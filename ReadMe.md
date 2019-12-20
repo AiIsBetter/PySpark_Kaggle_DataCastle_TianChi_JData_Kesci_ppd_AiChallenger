@@ -15,6 +15,8 @@
           <li>Ubuntu == 18.04
           <li>Hadoop == 2.7.7
           <li>Spark == 2.4.3
+          <li>PyCharm == 2019.3 Pro
+          <li>Python == 3.7+
           <li>单机伪分布式
           <li>i7 8750H,24G,GTX1060,笔记本
        </ul>
