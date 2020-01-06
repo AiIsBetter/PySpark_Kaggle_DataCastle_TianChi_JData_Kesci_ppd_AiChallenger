@@ -13,6 +13,9 @@ import gc
 import time
 from contextlib import contextmanager
 import warnings
+from pyspark.sql.functions import col
+from pyspark.ml.feature import StringIndexer
+from pyspark.ml.stat import Summarizer
 import os
 # COLUMNS WITH STRINGS
 str_type = ['ProductCD', 'card4', 'card6', 'P_emaildomain', 'R_emaildomain','M1', 'M2', 'M3', 'M4','M5',
@@ -80,30 +83,62 @@ def main(path = None,run_mode = 'standalone'):
             'test').getOrCreate()
     with timer("Load data finish:"):
         # LOAD TRAIN
+        cols_float = cols.copy()
+        cols_float.remove('TransactionID')
         # 问题2：直接用read.csv的默认参数读取hdfs上面的csv，会导致所有列的类型被读取为string，需要设置inferSchema=True，来自动推测列类型，达到pandas的read_csv的效果
         X_train = spark.read.csv(path=path+'train_transaction.csv', schema=None, sep=',', header=True,inferSchema=True).select(cols + ['isFraud'])
         train_id = spark.read.csv(path=path+'train_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
         print(X_train.dtypes)
         X_train = X_train.join(train_id, on='TransactionID', how='left')
+        X_train = X_train.select([col(column).cast('string') if column in str_type  else col(column) for column in X_train.columns ])
+        X_train = X_train.select([col(column).cast('float') if column in cols_float  else col(column) for column in X_train.columns ])
         print((X_train.count(), len(X_train.columns)))
         # LOAD TEST
         X_test = spark.read.csv(path=path+'test_transaction.csv', schema=None, sep=',', header=True,inferSchema=True).select(cols)
         test_id = spark.read.csv(path=path+'test_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
         X_test = X_test.join(test_id, on='TransactionID', how='left')
-        print(X_test.dtypes)
+        X_test = X_test.select([col(column).cast('string') if column in str_type  else col(column) for column in X_test.columns ])
+        X_test = X_test.select([col(column).cast('float') if column in cols_float  else col(column) for column in X_test.columns ])
+        # print(X_test.dtypes)
         print((X_test.count(), len(X_test.columns)))
         # TARGET
         y_train = X_train[['isFraud']]
         X_train = X_train.drop('isFraud')
-        X_train.show()
-        print(X_train.dtypes)
+        # X_train.show()
+        # print(X_train.dtypes)
     with timer("Data Preprocess"):
         # NORMALIZE D COLUMNS
         for i in range(1, 16):
             if i in [1, 2, 3, 5, 9]: continue
-            # 问题3：Pysparkb不能除以numpy.float32,会报错，上网查了下，说是两种type还是不太一样。所以这里直接乘以1.0，用python的float
-            X_train= X_train.withColumn('D' + str(i),X_train['D' + str(i)] - X_train['TransactionDT']*1.0/ 24 * 60 * 60)
-            X_test = X_test.withColumn('D' + str(i),X_test['D' + str(i)] - X_test['TransactionDT'] * 1.0 / 24 * 60 * 60)
+            # 问题3：Pyspark不能除以numpy.float32,会报错，上网查了下，说是两种type还是不太一样。所以这里直接乘以1.0用python的float，或者改为用np.float64即可
+            X_train= X_train.withColumn('D' + str(i),X_train['D' + str(i)] -(X_train['TransactionDT']/ np.float64(24 * 60 * 60)))
+            X_test = X_test.withColumn('D' + str(i),X_test['D' + str(i)] - (X_test['TransactionDT']/  np.float64(24 * 60 * 60)))
+        col_type = dict(X_train.dtypes)
+         # LABEL ENCODE AND MEMORY REDUCE
+        for i,f in enumerate(X_train.columns):
+             # FACTORIZE CATEGORICAL VARIABLES
+            if np.str(col_type[f])=='string':
+                print(f)
+                df_comb = X_train[[f]].union(X_test[[f]])
+                # df_comb = pd.concat([X_train[f],X_test[f]],axis=0)
+                stringIndexer = StringIndexer(inputCol=f, outputCol="f_index", handleInvalid="error",
+                stringOrderType="frequencyDesc")
+                model = stringIndexer.fit(df_comb)
+                summarizer = Summarizer.metrics("mean", "count")
+                td = model.transform(df_comb)
+                df_comb.select(summarizer.summary(td[f], td['f_index'])).show(truncate=False)
+                df_comb,_ = df_comb.factorize(sort=True)
+                if df_comb.max()>32000: print(f,'needs int32')
+                X_train[f] = df_comb[:len(X_train)].astype('int16')
+                X_test[f] = df_comb[len(X_train):].astype('int16')
+             # SHIFT ALL NUMERICS POSITIVE. SET NAN to -1
+             # elif f not in ['TransactionAmt','TransactionDT']:
+             #     mn = np.min((X_train[f].min(),X_test[f].min()))
+             #     X_train[f] -= np.float32(mn)
+             #     X_test[f] -= np.float32(mn)
+             #     X_train[f].fillna(-1,inplace=True)
+             #     X_test[f].fillna(-1,inplace=True)
+        print(X_train.dtypes)
         X_train.show()
 
 if __name__ == "__main__":
