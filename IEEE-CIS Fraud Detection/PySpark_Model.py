@@ -15,7 +15,9 @@ from contextlib import contextmanager
 import warnings
 from pyspark.sql.functions import col
 from pyspark.ml.feature import StringIndexer
+from pyspark.sql.functions import monotonically_increasing_id
 from pyspark.ml.stat import Summarizer
+import pyspark.sql.functions as fn
 import os
 # COLUMNS WITH STRINGS
 str_type = ['ProductCD', 'card4', 'card6', 'P_emaildomain', 'R_emaildomain','M1', 'M2', 'M3', 'M4','M5',
@@ -62,7 +64,8 @@ v += [281, 283, 289, 296, 301, 314] # relates to groups, no NAN
 cols += ['V'+str(x) for x in v]
 dtypes = {}
 for c in cols+['id_0'+str(x) for x in range(1,10)]+['id_'+str(x) for x in range(10,34)]:
-    dtypes[c] = 'float32'
+    dtypes[c] = 'float'
+for c in str_type: dtypes[c] = 'string'
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 @contextmanager
@@ -71,6 +74,7 @@ def timer(title):
     yield
     print("{} - done in {:.0f}s".format(title, time.time() - t0))
 
+
 def main(path = None,run_mode = 'standalone'):
     if(run_mode == 'standalone'):
         #问题1：刚开始用Pyspark,发现伪分布式下面，默认读取所有core，比如我的电脑是12，然后executor直接通过spark的配置文件spark-env.sh无法修改，总是只有一个executor，里面的
@@ -78,6 +82,7 @@ def main(path = None,run_mode = 'standalone'):
         # '5g')可以设置较大的executor内存,其他的参数类似config('spark.num.executors', '2').config('spark.executor.cores', '6')都可以使用，按需选择即可
         spark = SparkSession.builder.master('spark://aigege-OMEN-by-HP-Laptop-15-dc0xxx:7077').appName('train').config('spark.executor.memory', '5g').\
             getOrCreate()
+        spark.conf.set("spark.sql.crossJoin.enabled", "true")
     elif(run_mode == 'online'):
         spark = SparkSession.builder.appName(
             'test').getOrCreate()
@@ -90,20 +95,22 @@ def main(path = None,run_mode = 'standalone'):
         train_id = spark.read.csv(path=path+'train_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
         print(X_train.dtypes)
         X_train = X_train.join(train_id, on='TransactionID', how='left')
-        X_train = X_train.select([col(column).cast('string') if column in str_type  else col(column) for column in X_train.columns ])
-        X_train = X_train.select([col(column).cast('float') if column in cols_float  else col(column) for column in X_train.columns ])
-        print((X_train.count(), len(X_train.columns)))
         # LOAD TEST
         X_test = spark.read.csv(path=path+'test_transaction.csv', schema=None, sep=',', header=True,inferSchema=True).select(cols)
         test_id = spark.read.csv(path=path+'test_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
         X_test = X_test.join(test_id, on='TransactionID', how='left')
-        X_test = X_test.select([col(column).cast('string') if column in str_type  else col(column) for column in X_test.columns ])
-        X_test = X_test.select([col(column).cast('float') if column in cols_float  else col(column) for column in X_test.columns ])
-        # print(X_test.dtypes)
-        print((X_test.count(), len(X_test.columns)))
         # TARGET
         y_train = X_train[['isFraud']]
         X_train = X_train.drop('isFraud')
+        # 修改列类型
+        X_test = X_test.select([col(column).cast('string') if dtypes[column]=='string'  else col(column) for column in X_test.columns ])
+        X_test = X_test.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_test.columns ])
+        print((X_test.count(), len(X_test.columns)))
+        X_train = X_train.select([col(column).cast('string') if dtypes[column]=='string' else col(column) for column in X_train.columns ])
+        print(X_train.dtypes)
+        X_train = X_train.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_train.columns ])
+        print(X_train.dtypes)
+        print((X_train.count(), len(X_train.columns)))
         # X_train.show()
         # print(X_train.dtypes)
     with timer("Data Preprocess"):
@@ -114,23 +121,39 @@ def main(path = None,run_mode = 'standalone'):
             X_train= X_train.withColumn('D' + str(i),X_train['D' + str(i)] -(X_train['TransactionDT']/ np.float64(24 * 60 * 60)))
             X_test = X_test.withColumn('D' + str(i),X_test['D' + str(i)] - (X_test['TransactionDT']/  np.float64(24 * 60 * 60)))
         col_type = dict(X_train.dtypes)
+        # 问题4：Pyspark没找到直接切片的方法，所以用monotonically_increasing_id函数生产index列，作为后续切片的一句，这种方法产生的
+        #monotonically_increasing_id不是连续递增，而只是保证每个分区里面的id是单调递增的，所以无法保证很好的切分数据，另一种找到的方法是
+        # 创建以下函数
+        # def getrows(df, rownums=None):
+        #     return df.rdd.zipWithIndex().filter(lambda x: x[1] in rownums).map(lambda x: x[0])
+        # 对dataframe切片的函数，比如df[0:100]，跟这种功能类似，rownums可以使用【1,2,3】或者rownums=range(0,X_train.count())来达到
+        # 选取指定行或者指定行范围的切片效果。但是这种方法返回的是rdd，返回以后虽然可以使用toDF来达到转换Dataframe的目的，但是有可能因为
+        #RDD中元素的内部结构是未知的、不明确的，也就是说每个元素里面有哪些字段，每个字段是什么类型，这些都是不知道的，而DataFrame则要求对
+        # 元素的内部结构有完全的知情权。导致出现ValueError: Some of types cannot be determined by the first 100 rows的错误。最后选择
+        #的方法是用limit(n)和subtract来达到train和test在和并编码完成以后再分开的效果。
          # LABEL ENCODE AND MEMORY REDUCE
-        for i,f in enumerate(X_train.columns):
+        for i,f in enumerate(str_type):
              # FACTORIZE CATEGORICAL VARIABLES
-            if np.str(col_type[f])=='string':
+            if (np.str(col_type[f])=='string'):
                 print(f)
                 df_comb = X_train[[f]].union(X_test[[f]])
                 # df_comb = pd.concat([X_train[f],X_test[f]],axis=0)
-                stringIndexer = StringIndexer(inputCol=f, outputCol="f_index", handleInvalid="error",
+                stringIndexer = StringIndexer(inputCol=f, outputCol="encode", handleInvalid="keep",
                 stringOrderType="frequencyDesc")
                 model = stringIndexer.fit(df_comb)
-                summarizer = Summarizer.metrics("mean", "count")
-                td = model.transform(df_comb)
-                df_comb.select(summarizer.summary(td[f], td['f_index'])).show(truncate=False)
-                df_comb,_ = df_comb.factorize(sort=True)
-                if df_comb.max()>32000: print(f,'needs int32')
-                X_train[f] = df_comb[:len(X_train)].astype('int16')
-                X_test[f] = df_comb[len(X_train):].astype('int16')
+                label_encode = model.transform(df_comb)
+                label_encode_train = label_encode.limit(X_train.count())
+                label_encode__test = label_encode.exceptAll(label_encode_train)
+                #
+                # print((label_encode_train.count(), len(label_encode_train.columns)))
+                # print((label_encode__test.count(), len(label_encode__test.columns)))
+                # 问题5：本来生成的编码列直接赋值给原来的列就行了，但是spark不支持这种方式，只能拼接进去以后再删除原始列，然后修改列名了
+                X_train= X_train.join(label_encode_train[["encode"]],how = 'left').drop(f).withColumnRenamed('encode',f)
+                X_test = X_test.join(label_encode__test[["encode"]],how = 'left').drop(f).withColumnRenamed('encode',f)
+            X_train.show()
+            X_test.show(1000)
+            print(X_train.count(), len(X_train.columns))
+            print(X_test.count(), len(X_test.columns))
              # SHIFT ALL NUMERICS POSITIVE. SET NAN to -1
              # elif f not in ['TransactionAmt','TransactionDT']:
              #     mn = np.min((X_train[f].min(),X_test[f].min()))
