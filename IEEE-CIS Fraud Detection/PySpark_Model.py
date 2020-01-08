@@ -15,9 +15,10 @@ from contextlib import contextmanager
 import warnings
 from pyspark.sql.functions import col
 from pyspark.ml.feature import StringIndexer
+from pyspark.sql import functions as F
 from pyspark.sql.functions import monotonically_increasing_id
 from pyspark.ml.stat import Summarizer
-import pyspark.sql.functions as fn
+
 import os
 # COLUMNS WITH STRINGS
 str_type = ['ProductCD', 'card4', 'card6', 'P_emaildomain', 'R_emaildomain','M1', 'M2', 'M3', 'M4','M5',
@@ -74,6 +75,43 @@ def timer(title):
     yield
     print("{} - done in {:.0f}s".format(title, time.time() - t0))
 
+# FREQUENCY ENCODE TOGETHER
+def encode_FE(df, cols):
+    for col in cols:
+        # 生成对应的每个值的出现频率字典
+        tmp = df.groupBy(col).count().orderBy('count',ascending = False)
+        tmp_sum = tmp.select(F.sum('count')).collect()[0][0]
+        tmp = tmp.withColumn('count',tmp['count']/tmp_sum)
+        tmp = tmp[col,'count'].collect()
+        tmp = dict(zip([i[0] for i in tmp],[i[1] for i in tmp]))
+        tmp[-1] = -1
+        nm = col + '_FE'
+        df = df.withColumn(nm, df[col])
+        df = df.replace(to_replace=tmp, subset=[nm])
+        print(nm, ', ', end='')
+    return df
+# LABEL ENCODE
+# def encode_LE(col, df, verbose=True):
+#     df_comb = pd.concat([train[col], test[col]], axis=0)
+#     df_comb, _ = df_comb.factorize(sort=True)
+#     nm = col
+#     if df_comb.max() > 32000:
+#         train[nm] = df_comb[:len(train)].astype('int32')
+#         test[nm] = df_comb[len(train):].astype('int32')
+#     else:
+#         train[nm] = df_comb[:len(train)].astype('int16')
+#         test[nm] = df_comb[len(train):].astype('int16')
+#     del df_comb;
+#     x = gc.collect()
+#     if verbose: print(nm, ', ', end='')
+# COMBINE FEATURES
+def encode_CB(df,col1, col2, ):
+    nm = col1 + '_' + col2
+    df= df.withColumn(nm,df[col1].cast('string') + '_' + df[col2].cast('string'))
+    df.show(100)
+    # encode_LE(nm, verbose=False)
+    print(nm, ', ', end='')
+
 
 def main(path = None,run_mode = 'standalone'):
     if(run_mode == 'standalone'):
@@ -107,9 +145,7 @@ def main(path = None,run_mode = 'standalone'):
         X_test = X_test.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_test.columns ])
         print((X_test.count(), len(X_test.columns)))
         X_train = X_train.select([col(column).cast('string') if dtypes[column]=='string' else col(column) for column in X_train.columns ])
-        print(X_train.dtypes)
         X_train = X_train.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_train.columns ])
-        print(X_train.dtypes)
         print((X_train.count(), len(X_train.columns)))
         # X_train.show()
         # print(X_train.dtypes)
@@ -121,6 +157,7 @@ def main(path = None,run_mode = 'standalone'):
             X_train= X_train.withColumn('D' + str(i),X_train['D' + str(i)] -(X_train['TransactionDT']/ np.float64(24 * 60 * 60)))
             X_test = X_test.withColumn('D' + str(i),X_test['D' + str(i)] - (X_test['TransactionDT']/  np.float64(24 * 60 * 60)))
         col_type = dict(X_train.dtypes)
+
         # 问题4：Pyspark没找到直接切片的方法，所以用monotonically_increasing_id函数生产index列，作为后续切片的一句，这种方法产生的
         #monotonically_increasing_id不是连续递增，而只是保证每个分区里面的id是单调递增的，所以无法保证很好的切分数据，另一种找到的方法是
         # 创建以下函数
@@ -132,37 +169,58 @@ def main(path = None,run_mode = 'standalone'):
         # 元素的内部结构有完全的知情权。导致出现ValueError: Some of types cannot be determined by the first 100 rows的错误。最后选择
         #的方法是用limit(n)和subtract来达到train和test在和并编码完成以后再分开的效果。
          # LABEL ENCODE AND MEMORY REDUCE
-        for i,f in enumerate(str_type):
+        print(X_train.count(), len(X_train.columns))
+        print(X_test.count(), len(X_test.columns))
+        df_comb = X_train.union(X_test)
+        for i,f in enumerate(['addr1', 'card1', 'card2', 'card3', 'P_emaildomain']):
              # FACTORIZE CATEGORICAL VARIABLES
             if (np.str(col_type[f])=='string'):
                 print(f)
-                df_comb = X_train[[f]].union(X_test[[f]])
-                # df_comb = pd.concat([X_train[f],X_test[f]],axis=0)
-                stringIndexer = StringIndexer(inputCol=f, outputCol="encode", handleInvalid="keep",
+                # 这里是一开始不熟悉Pyspark api，写的效率比较低，留在这里保存下，和后面写法结果是一致的，只是比较慢
+                # df_comb = X_train[[f,'TransactionID']].union(X_test[[f,'TransactionID']])
+                # # df_comb = pd.concat([X_train[f],X_test[f]],axis=0)
+                # stringIndexer = StringIndexer(inputCol=f, outputCol="encode", handleInvalid="keep",
+                # stringOrderType="frequencyDesc")
+                # model = stringIndexer.fit(df_comb)
+                # label_encode = model.transform(df_comb)
+                # label_encode_train = label_encode.limit(X_train.count())
+                # label_encode__test = label_encode.exceptAll(label_encode_train)
+                # # 问题5：本来生成的编码列直接赋值给原来的列就行了，但是spark不支持这种方式，只能拼接进去以后再删除原始列，然后修改列名了，因为没有concat，
+                # #Pyspark里面的concat是直接拼到一列里面，不是pandas那种axis=1然后多出一新列,必须使用join，withColumn只能在本df上面的列上操作后才能直接新增一列，
+                # # 不适用于本情况中其他df中的一列新增
+                # X_train= X_train.join(label_encode_train[["encode",'TransactionID']],how = 'left',on = 'TransactionID').drop(f).withColumnRenamed('encode',f)
+                # X_test = X_test.join(label_encode__test[["encode",'TransactionID']],how = 'left',on = 'TransactionID').drop(f).withColumnRenamed('encode',f)
+                stringIndexer = StringIndexer(inputCol=f, outputCol=f+"_encode", handleInvalid="keep",
                 stringOrderType="frequencyDesc")
                 model = stringIndexer.fit(df_comb)
-                label_encode = model.transform(df_comb)
-                label_encode_train = label_encode.limit(X_train.count())
-                label_encode__test = label_encode.exceptAll(label_encode_train)
-                #
-                # print((label_encode_train.count(), len(label_encode_train.columns)))
-                # print((label_encode__test.count(), len(label_encode__test.columns)))
-                # 问题5：本来生成的编码列直接赋值给原来的列就行了，但是spark不支持这种方式，只能拼接进去以后再删除原始列，然后修改列名了
-                X_train= X_train.join(label_encode_train[["encode"]],how = 'left').drop(f).withColumnRenamed('encode',f)
-                X_test = X_test.join(label_encode__test[["encode"]],how = 'left').drop(f).withColumnRenamed('encode',f)
-            X_train.show()
-            X_test.show(1000)
-            print(X_train.count(), len(X_train.columns))
-            print(X_test.count(), len(X_test.columns))
-             # SHIFT ALL NUMERICS POSITIVE. SET NAN to -1
-             # elif f not in ['TransactionAmt','TransactionDT']:
-             #     mn = np.min((X_train[f].min(),X_test[f].min()))
-             #     X_train[f] -= np.float32(mn)
-             #     X_test[f] -= np.float32(mn)
-             #     X_train[f].fillna(-1,inplace=True)
-             #     X_test[f].fillna(-1,inplace=True)
-        print(X_train.dtypes)
-        X_train.show()
+                df_comb = model.transform(df_comb)
+                # SHIFT ALL NUMERICS POSITIVE. SET NAN to -1
+            elif(np.str(col_type[f])!='string') and  f not in ['TransactionAmt', 'TransactionDT','TransactionID']:
+                print(f)
+                min_tmp = df_comb.agg({f: "min"}).collect()[0][0]
+                df_comb = df_comb.withColumn(f,df_comb[f]-min_tmp)
+                df_comb = df_comb.fillna({f:-1})
+        rename_col = [name + '_encode' for name in str_type]
+        rename_col = dict(zip(rename_col, str_type))
+        # 问题6：drop不能像pandas那样，直接drop['a','b'],前面的加*，或者直接一个一个写出，例如：‘a'，’b'
+        df_comb = df_comb.drop(*str_type)
+        # 问题7：对列名批量重命名，一开始是准备使用withcolumnrename，然后也讲变量名生成的字典传进去作为参数，类似{‘old nmae’：‘new name’，。。。}
+        # 但是发现这个api这样用无效，后面就在stackoverflow找了下面这种曲线救国的方式来批量重命名，效果和pandas rename一样。
+        df_comb = df_comb.select([col(c).alias(rename_col.get(c, c)) for c in df_comb.columns])
+        X_train = df_comb.limit(X_train.count())
+        X_test = df_comb.exceptAll(X_train)
+    with timer("Feature engineering"):
+        # TRANSACTION AMT CENTS
+        X_train = X_train.withColumn('cents',X_train['TransactionAmt'] - F.floor(X_train['TransactionAmt']))
+        X_test = X_test.withColumn('cents',X_test['TransactionAmt'] - F.floor(X_test['TransactionAmt']))
+        df_comb = X_train.union(X_test)
+        # FREQUENCY ENCODE: ADDR1, CARD1, CARD2, CARD3, P_EMAILDOMAIN
+        # df_comb = encode_FE(df_comb, ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain'])
+        # COMBINE COLUMNS CARD1+ADDR1, CARD1+ADDR1+P_EMAILDOMAIN
+        encode_CB(df_comb,'card1', 'addr1')
+
+        a = 1
+
 
 if __name__ == "__main__":
     path = "hdfs://localhost:9000/user/kaggle_fraud_detection/data/"
