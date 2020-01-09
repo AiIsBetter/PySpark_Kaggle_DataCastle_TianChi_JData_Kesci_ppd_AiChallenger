@@ -65,44 +65,40 @@ v += [303, 305, 307, 309, 310, 320] # relates to groups, no NAN
 v += [281, 283, 289, 296, 301, 314] # relates to groups, no NAN
 #v += [332, 325, 335, 338] # b4 lots NAN
 
+v = ['127', '136', '309', '307', '320']
 cols += ['V'+str(x) for x in v]
 dtypes = {}
 for c in cols+['id_0'+str(x) for x in range(1,10)]+['id_'+str(x) for x in range(10,34)]:
     dtypes[c] = 'float'
 for c in str_type: dtypes[c] = 'string'
 warnings.simplefilter(action='ignore', category=FutureWarning)
-
 @contextmanager
 def timer(title):
     t0 = time.time()
     yield
     print("{} - done in {:.0f}s".format(title, time.time() - t0))
-
 # FREQUENCY ENCODE TOGETHER
 def encode_FE(df, cols):
     print('encode_FE')
     for col in cols:
         # 生成对应的每个值的出现频率字典
-        print('11')
         tmp = df.groupBy(col).count().orderBy('count',ascending = False)
-        print('111')
         tmp_sum = tmp.select(F.sum('count')).collect()[0][0]
-        print('1111')
         tmp = tmp.withColumn('count',tmp['count']/tmp_sum)
         # print(tmp.count())
         # tmp.show(100)
-        print('11111')
         # tmp = tmp[col,'count'].collect()
-        tmp = tmp.select("*").toPandas()
-        print('111111')
-        tmp = dict(zip([i for i in tmp[col]],[i for i in tmp['count']]))
-        print('1111111')
-        tmp[-1] = -1
+        # 因为使用了toPandas来获取数据，所以需要安装pyarrow这个包，我一开始安装pyspark的时候没有默认安装，导致每次这一步的时候卡半小时，装了以后就很快了。
+        #具体参考spark官网关于arrow加速的章节。
+        tmp = tmp.toPandas()
+        tmp = dict(zip([str(i) for i in tmp[col]],[str(i) for i in tmp['count']]))
+        tmp['-1'] = '-1'
         nm = col + '_FE'
-        print('11111111')
-        df = df.withColumn(nm, df[col])
-        print('111111111')
+        df = df.withColumn(nm, df[col].cast('string'))
+        print(df.dtypes)
+        # 这里相当于pandas里面，df.map(dict)的效果。
         df = df.replace(to_replace=tmp, subset=[nm])
+        df = df.withColumn(nm, df[nm].cast('float'))
         print(nm, ', ', end='')
         del tmp
         gc.collect()
@@ -139,26 +135,30 @@ def encode_AG(main_columns, uids,df, aggregations=['mean'],
 
                 tmp = df.groupBy(col).agg({main_column:agg_type})
                 tmp_name = tmp.columns[1]
+                ###############这一段主要是生成map需要用的字典，所以需要topandas获得具体的值存入内存中，然后用来生成字典
                 tmp = tmp.withColumnRenamed(tmp_name,new_col_name)
                 tmp = tmp.toPandas()
-                tmp = dict(zip([i for i in tmp[col]], [i for i in tmp[new_col_name]]))
-                df = df.withColumn(new_col_name, df[col])
+                tmp = dict(zip([str(i) for i in tmp[col]], [str(i) for i in tmp[new_col_name]]))
+                df = df.withColumn(new_col_name, df[col].cast('string'))
+                # 这里相当于pandas里面，df.map(dict)的效果。
                 df = df.replace(to_replace=tmp, subset=[new_col_name])
+                df = df.withColumn(new_col_name, df[new_col_name].cast('float'))
                 if fillna:
                     df = df.fillna({new_col_name:-1})
                 return  df
 # GROUP AGGREGATION NUNIQUE
 def encode_AG2(main_columns, uids, df):
+    print('encode_AG2')
     for main_column in main_columns:
         for col in uids:
             tmp = df.groupby(col).agg(F.expr('count(distinct {})'.format(main_column)).alias('nunique'))
+            ###############这一段主要是生成map需要用的字典，所以需要topandas获得具体的值存入内存中，然后用来生成字典
             tmp = tmp.toPandas()
-            tmp = dict(zip([i for i in tmp[col]], [str(i) for i in tmp['nunique']]))
+            tmp = dict(zip([str(i) for i in tmp[col]], [str(i) for i in tmp['nunique']]))
             df = df.withColumn(col + '_' + main_column + '_ct', df[col].cast('string'))
-            print(df.dtypes)
+            # 这里相当于pandas里面，df.map(dict)的效果。
             df = df.replace(to_replace=tmp, subset=[col + '_' + main_column + '_ct'])
             df = df.withColumn(col + '_' + main_column + '_ct', df[col + '_' + main_column + '_ct'].cast('float'))
-            df.show(1000)
             return df
 def main(path = None,run_mode = 'standalone',debug = True):
     if(run_mode == 'standalone'):
@@ -174,8 +174,8 @@ def main(path = None,run_mode = 'standalone',debug = True):
         spark = SparkSession.builder. \
             config(conf=conf). \
             getOrCreate()
-        #
-        # # Generate a Pandas DataFrame
+        # #
+        # # # Generate a Pandas DataFrame
         # pdf = pd.DataFrame(np.random.rand(3000000, 3))
         #
         # # Create a Spark DataFrame from a Pandas DataFrame using Arrow
@@ -183,9 +183,8 @@ def main(path = None,run_mode = 'standalone',debug = True):
         #
         # # Convert the Spark DataFrame back to a Pandas DataFrame using Arrow
         # start = time.time()
-        # result_pdf = df.select("*").toPandas()
+        # result_pdf = df.toPandas()
         # end = time.time() - start
-        a = 1
         # spark.conf.set("spark.sql.crossJoin.enabled", "true")
         # spark.conf.set("spark.sql.execution.arrow.enabled", "true")
     elif(run_mode == 'online'):
@@ -250,7 +249,8 @@ def main(path = None,run_mode = 'standalone',debug = True):
         print(X_train.count(), len(X_train.columns))
         print(X_test.count(), len(X_test.columns))
         df_comb = X_train.union(X_test)
-        for i,f in enumerate(['addr1', 'card1', 'card2', 'card3', 'P_emaildomain']):
+        ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain']
+        for i,f in enumerate(X_train.columns):
              # FACTORIZE CATEGORICAL VARIABLES
             if (np.str(col_type[f])=='string'):
                 print(f)
@@ -273,7 +273,7 @@ def main(path = None,run_mode = 'standalone',debug = True):
                 model = stringIndexer.fit(df_comb)
                 df_comb = model.transform(df_comb)
                 # SHIFT ALL NUMERICS POSITIVE. SET NAN to -1
-            elif(np.str(col_type[f])!='string') and  f not in ['TransactionAmt', 'TransactionDT','TransactionID']:
+            elif f not in ['TransactionAmt', 'TransactionDT','TransactionID']:
                 print(f)
                 min_tmp = df_comb.agg({f: "min"}).collect()[0][0]
                 df_comb = df_comb.withColumn(f,df_comb[f]-min_tmp)
@@ -289,36 +289,29 @@ def main(path = None,run_mode = 'standalone',debug = True):
         X_test = df_comb.exceptAll(X_train)
     with timer("Feature engineering"):
         # TRANSACTION AMT CENTS
-        # X_train = X_train.withColumn('cents',X_train['TransactionAmt'] - F.floor(X_train['TransactionAmt']))
-        # X_test = X_test.withColumn('cents',X_test['TransactionAmt'] - F.floor(X_test['TransactionAmt']))
-        # df_comb = X_train.union(X_test)
-        # # FREQUENCY ENCODE: ADDR1, CARD1, CARD2, CARD3, P_EMAILDOMAIN
-        # df_comb = encode_FE(df_comb, ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain'])
-        # # COMBINE COLUMNS CARD1+ADDR1, CARD1+ADDR1+P_EMAILDOMAIN
-        # df_comb = encode_CB(df_comb,'card1', 'addr1')
-        # df_comb = encode_CB(df_comb,'card1_addr1', 'P_emaildomain')
-        # # FREQUENCY ENOCDE
-        # df_comb = encode_FE(df_comb, ['card1_addr1', 'card1_addr1_P_emaildomain'])
-        # # GROUP AGGREGATE
-        # df_comb = encode_AG(['TransactionAmt', 'D9', 'D11'], ['card1', 'card1_addr1', 'card1_addr1_P_emaildomain'],df_comb,
-        #           ['mean', 'std'], usena=True)
-
+        X_train = X_train.withColumn('cents',X_train['TransactionAmt'] - F.floor(X_train['TransactionAmt']))
+        X_test = X_test.withColumn('cents',X_test['TransactionAmt'] - F.floor(X_test['TransactionAmt']))
+        df_comb = X_train.union(X_test)
+        # FREQUENCY ENCODE: ADDR1, CARD1, CARD2, CARD3, P_EMAILDOMAIN
+        df_comb = encode_FE(df_comb, ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain'])
+        # COMBINE COLUMNS CARD1+ADDR1, CARD1+ADDR1+P_EMAILDOMAIN
+        df_comb = encode_CB(df_comb,'card1', 'addr1')
+        df_comb = encode_CB(df_comb,'card1_addr1', 'P_emaildomain')
+        # FREQUENCY ENOCDE
+        df_comb = encode_FE(df_comb, ['card1_addr1', 'card1_addr1_P_emaildomain'])
+        # GROUP AGGREGATE
+        df_comb = encode_AG(['TransactionAmt', 'D9', 'D11'], ['card1', 'card1_addr1', 'card1_addr1_P_emaildomain'],df_comb,
+                  ['mean', 'std'], usena=True)
 
         START_DATE = datetime.datetime.strptime('2017-11-30', '%Y-%m-%d')
+        # 这里是模仿下面两列注释的pandas的写法，因为没找到pandas那样自带的属性，只能自己写自定义udf函数调用。
+        ## X_train['DT_M'] = X_train['TransactionDT'].apply(lambda x: (START_DATE + datetime.timedelta(seconds=x)))
         date_udf = F.udf(lambda x: START_DATE + datetime.timedelta(seconds=x), TimestampType())
-
         df_comb = df_comb.withColumn('DT_M',date_udf('TransactionDT'))
-        day_udf = F.udf(lambda x: x.day, IntegerType())
+        ## X_train['DT_M'] = (X_train['DT_M'].dt.year - 2017) * 12 + X_train['DT_M'].dt.month
+        month_udf = F.udf(lambda x: x.month, IntegerType())
         year_udf = F.udf(lambda x:x.year, IntegerType())
-        df_comb = df_comb.withColumn('DT_M', day_udf('DT_M'))
-        df_comb.show(100)
-        X_train['DT_M'] = X_train['TransactionDT'].apply(lambda x: (START_DATE + datetime.timedelta(seconds=x)))
-        X_train['DT_M'] = (X_train['DT_M'].dt.year - 2017) * 12 + X_train['DT_M'].dt.month
-
-        X_test['DT_M'] = X_test['TransactionDT'].apply(lambda x: (START_DATE + datetime.timedelta(seconds=x)))
-        X_test['DT_M'] = (X_test['DT_M'].dt.year - 2017) * 12 + X_test['DT_M'].dt.month
-
-
+        df_comb = df_comb.withColumn('DT_M', (year_udf('DT_M')-2017)*12+month_udf('DT_M'))
 
         # AGGREGATE
         df_comb = df_comb.withColumn('day',df_comb['TransactionDT']/ (24 * 60 * 60))
@@ -337,21 +330,37 @@ def main(path = None,run_mode = 'standalone',debug = True):
         # AGGREGATE
         df_comb = encode_AG2(['P_emaildomain', 'dist1', 'DT_M', 'id_02', 'cents'], ['uid'], df_comb)
         # AGGREGATE
-        df_comb = encode_AG(['C14'], ['uid'], ['std'], df_comb, fillna=True, usena=True)
+        df_comb = encode_AG(['C14'], ['uid'], df_comb, ['std'], fillna=True, usena=True)
         # AGGREGATE
         df_comb = encode_AG2(['C13', 'V314'], ['uid'], df_comb)
         # AGGREATE
         df_comb = encode_AG2(['V127', 'V136', 'V309', 'V307', 'V320'], ['uid'], df_comb)
         # NEW FEATURE
-        X_train['outsider15'] = (np.abs(X_train.D1 - X_train.D15) > 3).astype('int8')
         df_comb = df_comb.withColumn('outsider15', F.when(F.abs(df_comb['D1'] - df_comb['D15'])>3,1).otherwise(0))
         print('outsider15')
         cols1 = list(df_comb.columns)
         cols1.remove('TransactionDT')
+        for c in ['D6', 'D7', 'D8', 'D9', 'D12', 'D13', 'D14']:
+            cols1.remove(c)
+        for c in ['DT_M', 'day', 'uid']:
+            cols1.remove(c)
 
-
-
-
+        # FAILED TIME CONSISTENCY TEST
+        for c in ['C3', 'M5', 'id_08', 'id_33']:
+            cols1.remove(c)
+        for c in ['card4', 'id_07', 'id_14', 'id_21', 'id_30', 'id_32', 'id_34']:
+            cols1.remove(c)
+        for c in ['id_' + str(x) for x in range(22, 28)]:
+            cols1.remove(c)
+        print('NOW USING THE FOLLOWING', len(cols1), 'FEATURES.')
+        X_train = df_comb.limit(X_train.count())
+        X_test = df_comb.exceptAll(X_train)
+        print(X_test.dtypes)
+        print(X_train.dtypes)
+        print((X_test.count(), len(X_test.columns)))
+        print((X_train.count(), len(X_train.columns)))
+        X_train.write.mode('overwrite').csv(path+'X_train.csv',header='true')
+        X_test.write.mode('overwrite').csv(path + 'X_test.csv',header='true')
 
 if __name__ == "__main__":
     path = "hdfs://localhost:9000/user/kaggle_fraud_detection/data/"
