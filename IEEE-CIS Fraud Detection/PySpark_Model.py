@@ -8,6 +8,7 @@ Code: https://github.com/AiIsBetter
 # os.environ['PYSPARK_PYTHON'] = '/home/aigege/.conda/envs/py3-conda/bin/python3.6'
 from pyspark import SparkContext,SparkConf
 from pyspark.sql import SparkSession
+from pyspark.sql.types import TimestampType,FloatType,IntegerType
 import numpy as np
 import gc
 import time
@@ -16,9 +17,11 @@ import warnings
 from pyspark.sql.functions import col
 from pyspark.ml.feature import StringIndexer
 from pyspark.sql import functions as F
+from pyspark import SparkConf
+import pandas as pd
 from pyspark.sql.functions import monotonically_increasing_id
 from pyspark.ml.stat import Summarizer
-
+import datetime
 import os
 # COLUMNS WITH STRINGS
 str_type = ['ProductCD', 'card4', 'card6', 'P_emaildomain', 'R_emaildomain','M1', 'M2', 'M3', 'M4','M5',
@@ -77,50 +80,114 @@ def timer(title):
 
 # FREQUENCY ENCODE TOGETHER
 def encode_FE(df, cols):
+    print('encode_FE')
     for col in cols:
         # 生成对应的每个值的出现频率字典
+        print('11')
         tmp = df.groupBy(col).count().orderBy('count',ascending = False)
+        print('111')
         tmp_sum = tmp.select(F.sum('count')).collect()[0][0]
+        print('1111')
         tmp = tmp.withColumn('count',tmp['count']/tmp_sum)
-        tmp = tmp[col,'count'].collect()
-        tmp = dict(zip([i[0] for i in tmp],[i[1] for i in tmp]))
+        # print(tmp.count())
+        # tmp.show(100)
+        print('11111')
+        # tmp = tmp[col,'count'].collect()
+        tmp = tmp.select("*").toPandas()
+        print('111111')
+        tmp = dict(zip([i for i in tmp[col]],[i for i in tmp['count']]))
+        print('1111111')
         tmp[-1] = -1
         nm = col + '_FE'
+        print('11111111')
         df = df.withColumn(nm, df[col])
+        print('111111111')
         df = df.replace(to_replace=tmp, subset=[nm])
         print(nm, ', ', end='')
+        del tmp
+        gc.collect()
     return df
 # LABEL ENCODE
-# def encode_LE(col, df, verbose=True):
-#     df_comb = pd.concat([train[col], test[col]], axis=0)
-#     df_comb, _ = df_comb.factorize(sort=True)
-#     nm = col
-#     if df_comb.max() > 32000:
-#         train[nm] = df_comb[:len(train)].astype('int32')
-#         test[nm] = df_comb[len(train):].astype('int32')
-#     else:
-#         train[nm] = df_comb[:len(train)].astype('int16')
-#         test[nm] = df_comb[len(train):].astype('int16')
-#     del df_comb;
-#     x = gc.collect()
-#     if verbose: print(nm, ', ', end='')
+def encode_LE(col, df):
+    print('encode_LE')
+    stringIndexer = StringIndexer(inputCol=col, outputCol=col + "_encode", handleInvalid="keep",
+                                  stringOrderType="frequencyDesc")
+    model = stringIndexer.fit(df)
+    df = model.transform(df)
+    df = df.drop(col).withColumnRenamed(col + "_encode",col)
+    return df
 # COMBINE FEATURES
-def encode_CB(df,col1, col2, ):
+def encode_CB(df,col1, col2 ):
+    print('encode_CB')
     nm = col1 + '_' + col2
-    df= df.withColumn(nm,df[col1].cast('string') + '_' + df[col2].cast('string'))
-    df.show(100)
-    # encode_LE(nm, verbose=False)
-    print(nm, ', ', end='')
+    df= df.withColumn(nm,F.format_string('%s_%s',df[col1].cast('string'), df[col2].cast('string')))
+    df = encode_LE(nm,df)
+    return df
+# GROUP AGGREGATION MEAN AND STD
+def encode_AG(main_columns, uids,df, aggregations=['mean'],
+              fillna=True, usena=False):
+    # AGGREGATION OF MAIN WITH UID FOR GIVEN STATISTICS
+    print('encode_AG')
+    for main_column in main_columns:
+        for col in uids:
+            for agg_type in aggregations:
+                new_col_name = main_column + '_' + col + '_' + agg_type
+                # temp_df = df[[col, main_column]]
+                if usena:
+                    df = df.withColumn(main_column + 'new', F.when(df[main_column]!= -1, df[main_column]).otherwise(np.nan)).drop(df[main_column]) \
+                        .withColumnRenamed(main_column + 'new',main_column)
 
-
-def main(path = None,run_mode = 'standalone'):
+                tmp = df.groupBy(col).agg({main_column:agg_type})
+                tmp_name = tmp.columns[1]
+                tmp = tmp.withColumnRenamed(tmp_name,new_col_name)
+                tmp = tmp.toPandas()
+                tmp = dict(zip([i for i in tmp[col]], [i for i in tmp[new_col_name]]))
+                df = df.withColumn(new_col_name, df[col])
+                df = df.replace(to_replace=tmp, subset=[new_col_name])
+                if fillna:
+                    df = df.fillna({new_col_name:-1})
+                return  df
+# GROUP AGGREGATION NUNIQUE
+def encode_AG2(main_columns, uids, df):
+    for main_column in main_columns:
+        for col in uids:
+            tmp = df.groupby(col).agg(F.expr('count(distinct {})'.format(main_column)).alias('nunique'))
+            tmp = tmp.toPandas()
+            tmp = dict(zip([i for i in tmp[col]], [str(i) for i in tmp['nunique']]))
+            df = df.withColumn(col + '_' + main_column + '_ct', df[col].cast('string'))
+            print(df.dtypes)
+            df = df.replace(to_replace=tmp, subset=[col + '_' + main_column + '_ct'])
+            df = df.withColumn(col + '_' + main_column + '_ct', df[col + '_' + main_column + '_ct'].cast('float'))
+            df.show(1000)
+            return df
+def main(path = None,run_mode = 'standalone',debug = True):
     if(run_mode == 'standalone'):
+        conf = SparkConf()
+        conf.set('spark.sql.execute.arrow.enabled', 'true')
+        conf.setAppName('train').setMaster('spark://aigege-OMEN-by-HP-Laptop-15-dc0xxx:7077').set(
+            "spark.executor.memory", '5g').set("spark.sql.execution.arrow.enabled", "true").set("spark.sql.crossJoin.enabled", "true")
         #问题1：刚开始用Pyspark,发现伪分布式下面，默认读取所有core，比如我的电脑是12，然后executor直接通过spark的配置文件spark-env.sh无法修改，总是只有一个executor，里面的
         # SPARK_WORKER_MEMORY, to set how much total memory workers have to give executors，设置了以后是整个worker的memory，executor默认1024mb，所以下面的.config('spark.executor.memory',
         # '5g')可以设置较大的executor内存,其他的参数类似config('spark.num.executors', '2').config('spark.executor.cores', '6')都可以使用，按需选择即可
-        spark = SparkSession.builder.master('spark://aigege-OMEN-by-HP-Laptop-15-dc0xxx:7077').appName('train').config('spark.executor.memory', '5g').\
+        # spark = SparkSession.builder.master('spark://aigege-OMEN-by-HP-Laptop-15-dc0xxx:7077').appName('train').config('spark.executor.memory', '5g').\
+        #     config("spark.sql.execution.arrow.enabled", "true").getOrCreate()
+        spark = SparkSession.builder. \
+            config(conf=conf). \
             getOrCreate()
-        spark.conf.set("spark.sql.crossJoin.enabled", "true")
+        #
+        # # Generate a Pandas DataFrame
+        # pdf = pd.DataFrame(np.random.rand(3000000, 3))
+        #
+        # # Create a Spark DataFrame from a Pandas DataFrame using Arrow
+        # df = spark.createDataFrame(pdf)
+        #
+        # # Convert the Spark DataFrame back to a Pandas DataFrame using Arrow
+        # start = time.time()
+        # result_pdf = df.select("*").toPandas()
+        # end = time.time() - start
+        a = 1
+        # spark.conf.set("spark.sql.crossJoin.enabled", "true")
+        # spark.conf.set("spark.sql.execution.arrow.enabled", "true")
     elif(run_mode == 'online'):
         spark = SparkSession.builder.appName(
             'test').getOrCreate()
@@ -128,13 +195,24 @@ def main(path = None,run_mode = 'standalone'):
         # LOAD TRAIN
         cols_float = cols.copy()
         cols_float.remove('TransactionID')
+        row_nums = 1000
         # 问题2：直接用read.csv的默认参数读取hdfs上面的csv，会导致所有列的类型被读取为string，需要设置inferSchema=True，来自动推测列类型，达到pandas的read_csv的效果
-        X_train = spark.read.csv(path=path+'train_transaction.csv', schema=None, sep=',', header=True,inferSchema=True).select(cols + ['isFraud'])
+        if debug:
+            X_train = spark.read.csv(path=path + 'train_transaction.csv', schema=None, sep=',', header=True,
+                                     inferSchema=True).select(cols + ['isFraud']).limit(row_nums)
+        else:
+            X_train = spark.read.csv(path=path + 'train_transaction.csv', schema=None, sep=',', header=True,
+                                     inferSchema=True).select(cols + ['isFraud'])
         train_id = spark.read.csv(path=path+'train_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
         print(X_train.dtypes)
         X_train = X_train.join(train_id, on='TransactionID', how='left')
         # LOAD TEST
-        X_test = spark.read.csv(path=path+'test_transaction.csv', schema=None, sep=',', header=True,inferSchema=True).select(cols)
+        if debug:
+            X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
+                                    inferSchema=True).select(cols).limit(row_nums)
+        else:
+            X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
+                                    inferSchema=True).select(cols)
         test_id = spark.read.csv(path=path+'test_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
         X_test = X_test.join(test_id, on='TransactionID', how='left')
         # TARGET
@@ -204,25 +282,78 @@ def main(path = None,run_mode = 'standalone'):
         rename_col = dict(zip(rename_col, str_type))
         # 问题6：drop不能像pandas那样，直接drop['a','b'],前面的加*，或者直接一个一个写出，例如：‘a'，’b'
         df_comb = df_comb.drop(*str_type)
-        # 问题7：对列名批量重命名，一开始是准备使用withcolumnrename，然后也讲变量名生成的字典传进去作为参数，类似{‘old nmae’：‘new name’，。。。}
+        # 问题7：对列名批量重命名，一开始是准备使用withcolumnrename，然后将变量名生成的字典传进去作为参数，类似{‘old nmae’：‘new name’，。。。}
         # 但是发现这个api这样用无效，后面就在stackoverflow找了下面这种曲线救国的方式来批量重命名，效果和pandas rename一样。
         df_comb = df_comb.select([col(c).alias(rename_col.get(c, c)) for c in df_comb.columns])
         X_train = df_comb.limit(X_train.count())
         X_test = df_comb.exceptAll(X_train)
     with timer("Feature engineering"):
         # TRANSACTION AMT CENTS
-        X_train = X_train.withColumn('cents',X_train['TransactionAmt'] - F.floor(X_train['TransactionAmt']))
-        X_test = X_test.withColumn('cents',X_test['TransactionAmt'] - F.floor(X_test['TransactionAmt']))
-        df_comb = X_train.union(X_test)
-        # FREQUENCY ENCODE: ADDR1, CARD1, CARD2, CARD3, P_EMAILDOMAIN
+        # X_train = X_train.withColumn('cents',X_train['TransactionAmt'] - F.floor(X_train['TransactionAmt']))
+        # X_test = X_test.withColumn('cents',X_test['TransactionAmt'] - F.floor(X_test['TransactionAmt']))
+        # df_comb = X_train.union(X_test)
+        # # FREQUENCY ENCODE: ADDR1, CARD1, CARD2, CARD3, P_EMAILDOMAIN
         # df_comb = encode_FE(df_comb, ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain'])
-        # COMBINE COLUMNS CARD1+ADDR1, CARD1+ADDR1+P_EMAILDOMAIN
-        encode_CB(df_comb,'card1', 'addr1')
+        # # COMBINE COLUMNS CARD1+ADDR1, CARD1+ADDR1+P_EMAILDOMAIN
+        # df_comb = encode_CB(df_comb,'card1', 'addr1')
+        # df_comb = encode_CB(df_comb,'card1_addr1', 'P_emaildomain')
+        # # FREQUENCY ENOCDE
+        # df_comb = encode_FE(df_comb, ['card1_addr1', 'card1_addr1_P_emaildomain'])
+        # # GROUP AGGREGATE
+        # df_comb = encode_AG(['TransactionAmt', 'D9', 'D11'], ['card1', 'card1_addr1', 'card1_addr1_P_emaildomain'],df_comb,
+        #           ['mean', 'std'], usena=True)
 
-        a = 1
+
+        START_DATE = datetime.datetime.strptime('2017-11-30', '%Y-%m-%d')
+        date_udf = F.udf(lambda x: START_DATE + datetime.timedelta(seconds=x), TimestampType())
+
+        df_comb = df_comb.withColumn('DT_M',date_udf('TransactionDT'))
+        day_udf = F.udf(lambda x: x.day, IntegerType())
+        year_udf = F.udf(lambda x:x.year, IntegerType())
+        df_comb = df_comb.withColumn('DT_M', day_udf('DT_M'))
+        df_comb.show(100)
+        X_train['DT_M'] = X_train['TransactionDT'].apply(lambda x: (START_DATE + datetime.timedelta(seconds=x)))
+        X_train['DT_M'] = (X_train['DT_M'].dt.year - 2017) * 12 + X_train['DT_M'].dt.month
+
+        X_test['DT_M'] = X_test['TransactionDT'].apply(lambda x: (START_DATE + datetime.timedelta(seconds=x)))
+        X_test['DT_M'] = (X_test['DT_M'].dt.year - 2017) * 12 + X_test['DT_M'].dt.month
+
+
+
+        # AGGREGATE
+        df_comb = df_comb.withColumn('day',df_comb['TransactionDT']/ (24 * 60 * 60))
+        df_comb = df_comb.withColumn('uid', F.format_string('%s_%s', df_comb['card1_addr1'].cast('string'), F.floor(df_comb['day']-df_comb['D1'])))
+        df_comb = encode_AG2(['P_emaildomain','dist1','DT_M','id_02','cents'], ['uid'], df_comb)
+
+        # FREQUENCY ENCODE UID
+        df_comb = encode_FE(df_comb,['uid'])
+        # AGGREGATE
+        df_comb = encode_AG(['TransactionAmt', 'D4', 'D9', 'D10', 'D15'], ['uid'], df_comb, ['mean', 'std'], fillna=True, usena=True)
+        # AGGREGATE
+        df_comb = encode_AG(['C' + str(x) for x in range(1, 15) if x != 3], ['uid'], df_comb, ['mean'], fillna=True,
+                  usena=True)
+        # AGGREGATE
+        df_comb = encode_AG(['M' + str(x) for x in range(1, 10)], ['uid'], df_comb, ['mean'], fillna=True, usena=True)
+        # AGGREGATE
+        df_comb = encode_AG2(['P_emaildomain', 'dist1', 'DT_M', 'id_02', 'cents'], ['uid'], df_comb)
+        # AGGREGATE
+        df_comb = encode_AG(['C14'], ['uid'], ['std'], df_comb, fillna=True, usena=True)
+        # AGGREGATE
+        df_comb = encode_AG2(['C13', 'V314'], ['uid'], df_comb)
+        # AGGREATE
+        df_comb = encode_AG2(['V127', 'V136', 'V309', 'V307', 'V320'], ['uid'], df_comb)
+        # NEW FEATURE
+        X_train['outsider15'] = (np.abs(X_train.D1 - X_train.D15) > 3).astype('int8')
+        df_comb = df_comb.withColumn('outsider15', F.when(F.abs(df_comb['D1'] - df_comb['D15'])>3,1).otherwise(0))
+        print('outsider15')
+        cols1 = list(df_comb.columns)
+        cols1.remove('TransactionDT')
+
+
+
 
 
 if __name__ == "__main__":
     path = "hdfs://localhost:9000/user/kaggle_fraud_detection/data/"
     with timer("Full feature select run"):
-        main(path = path,run_mode = 'standalone')
+        main(path = path,run_mode = 'standalone',debug = True)
