@@ -65,11 +65,11 @@ v += [303, 305, 307, 309, 310, 320] # relates to groups, no NAN
 v += [281, 283, 289, 296, 301, 314] # relates to groups, no NAN
 #v += [332, 325, 335, 338] # b4 lots NAN
 
-v = ['127', '136', '309', '307', '320']
 cols += ['V'+str(x) for x in v]
 dtypes = {}
 for c in cols+['id_0'+str(x) for x in range(1,10)]+['id_'+str(x) for x in range(10,34)]:
     dtypes[c] = 'float'
+
 for c in str_type: dtypes[c] = 'string'
 warnings.simplefilter(action='ignore', category=FutureWarning)
 @contextmanager
@@ -165,7 +165,8 @@ def main(path = None,run_mode = 'standalone',debug = True):
         conf = SparkConf()
         conf.set('spark.sql.execute.arrow.enabled', 'true')
         conf.setAppName('train').setMaster('spark://aigege-OMEN-by-HP-Laptop-15-dc0xxx:7077').set(
-            "spark.executor.memory", '5g').set("spark.sql.execution.arrow.enabled", "true").set("spark.sql.crossJoin.enabled", "true")
+            "spark.executor.memory", '1g').set("spark.sql.execution.arrow.enabled", "true").set("spark.sql.crossJoin.enabled", "true")\
+            .set("spark.executor.instances", "4").set("spark.executor.cores", "3");
         #问题1：刚开始用Pyspark,发现伪分布式下面，默认读取所有core，比如我的电脑是12，然后executor直接通过spark的配置文件spark-env.sh无法修改，总是只有一个executor，里面的
         # SPARK_WORKER_MEMORY, to set how much total memory workers have to give executors，设置了以后是整个worker的memory，executor默认1024mb，所以下面的.config('spark.executor.memory',
         # '5g')可以设置较大的executor内存,其他的参数类似config('spark.num.executors', '2').config('spark.executor.cores', '6')都可以使用，按需选择即可
@@ -203,8 +204,8 @@ def main(path = None,run_mode = 'standalone',debug = True):
             X_train = spark.read.csv(path=path + 'train_transaction.csv', schema=None, sep=',', header=True,
                                      inferSchema=True).select(cols + ['isFraud'])
         train_id = spark.read.csv(path=path+'train_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
-        print(X_train.dtypes)
         X_train = X_train.join(train_id, on='TransactionID', how='left')
+        print(X_train.dtypes)
         # LOAD TEST
         if debug:
             X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
@@ -215,12 +216,13 @@ def main(path = None,run_mode = 'standalone',debug = True):
         test_id = spark.read.csv(path=path+'test_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
         X_test = X_test.join(test_id, on='TransactionID', how='left')
         # TARGET
-        y_train = X_train[['isFraud']]
+        y_train = X_train[['TransactionID','isFraud']]
         X_train = X_train.drop('isFraud')
         # 修改列类型
         X_test = X_test.select([col(column).cast('string') if dtypes[column]=='string'  else col(column) for column in X_test.columns ])
         X_test = X_test.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_test.columns ])
         print((X_test.count(), len(X_test.columns)))
+        print(X_train.dtypes)
         X_train = X_train.select([col(column).cast('string') if dtypes[column]=='string' else col(column) for column in X_train.columns ])
         X_train = X_train.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_train.columns ])
         print((X_train.count(), len(X_train.columns)))
@@ -361,8 +363,9 @@ def main(path = None,run_mode = 'standalone',debug = True):
         print((X_train.count(), len(X_train.columns)))
         X_train.write.mode('overwrite').csv(path+'X_train.csv',header='true')
         X_test.write.mode('overwrite').csv(path + 'X_test.csv',header='true')
-
+        y_train = X_train.join(y_train, on='TransactionID', how='left')
+        y_train.write.mode('overwrite').csv(path + 'XY_train.csv', header='true')
 if __name__ == "__main__":
     path = "hdfs://localhost:9000/user/kaggle_fraud_detection/data/"
     with timer("Full feature select run"):
-        main(path = path,run_mode = 'standalone',debug = True)
+        main(path = path,run_mode = 'standalone',debug = False)
