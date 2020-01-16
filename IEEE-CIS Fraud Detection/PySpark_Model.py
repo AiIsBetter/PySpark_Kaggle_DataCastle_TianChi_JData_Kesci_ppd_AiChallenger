@@ -8,6 +8,8 @@ Code: https://github.com/AiIsBetter
 # os.environ['PYSPARK_PYTHON'] = '/home/aigege/.conda/envs/py3-conda/bin/python3.6'
 from pyspark import SparkContext,SparkConf
 from pyspark.sql import SparkSession
+from pyspark.storagelevel import StorageLevel
+from pyspark import storagelevel
 from pyspark.sql.types import TimestampType,FloatType,IntegerType
 import numpy as np
 import gc
@@ -21,6 +23,7 @@ from pyspark import SparkConf
 import pandas as pd
 from pyspark.sql.functions import monotonically_increasing_id
 from pyspark.ml.stat import Summarizer
+from sklearn.model_selection import StratifiedKFold
 import datetime
 import os
 # COLUMNS WITH STRINGS
@@ -81,26 +84,34 @@ def timer(title):
 def encode_FE(df, cols):
     print('encode_FE')
     for col in cols:
+        print('encode_FE:{}'.format(col))
         # 生成对应的每个值的出现频率字典
-        tmp = df.groupBy(col).count().orderBy('count',ascending = False)
-        tmp_sum = tmp.select(F.sum('count')).collect()[0][0]
-        tmp = tmp.withColumn('count',tmp['count']/tmp_sum)
-        # print(tmp.count())
-        # tmp.show(100)
-        # tmp = tmp[col,'count'].collect()
-        # 因为使用了toPandas来获取数据，所以需要安装pyarrow这个包，我一开始安装pyspark的时候没有默认安装，导致每次这一步的时候卡半小时，装了以后就很快了。
+        tmp1 = df.groupBy(col).count().orderBy('count',ascending = False)
+        tmp_sum = tmp1.select(F.sum('count')).collect()[0][0]
+        tmp1 = tmp1.withColumn('count',tmp1['count']/tmp_sum)
+
+        # 问题8：因为使用了toPandas来获取数据，所以需要安装pyarrow这个包，我一开始安装pyspark的时候没有默认安装，导致每次这一步的时候卡半小时，装了以后就很快了。
         #具体参考spark官网关于arrow加速的章节。
-        tmp = tmp.toPandas()
-        tmp = dict(zip([str(i) for i in tmp[col]],[str(i) for i in tmp['count']]))
+        # 最终发现，collect的速度比topandas快了几十倍，而且topandas容易内存爆炸，所以还是选择了collect来获取数据。
+        tmp = tmp1.collect()
+        # tmp2 = tmp1.toPandas()
+        tmp = dict(zip([str(i[0]) for i in tmp], [str(i[1]) for i in tmp]))
+
+        # tmp = tmp1.collect()
+        # tmp = dict(zip([str(i[0]) for i in tmp],[str(i[1]) for i in tmp]))
         tmp['-1'] = '-1'
         nm = col + '_FE'
         df = df.withColumn(nm, df[col].cast('string'))
-        print(df.dtypes)
-        # 这里相当于pandas里面，df.map(dict)的效果。
-        df = df.replace(to_replace=tmp, subset=[nm])
+
+        # 问题9：注释掉的replace的写法这里相当于pandas里面，df.map(dict)的效果。不过replace也会导致内存占用过大，最终还是选择自定义udf函数的方式来实现map功能，
+        # 和pandas.apply功能类似。后面的函数里面实现一样，不再赘述。
+        # df = df.replace(to_replace=tmp, subset=[nm])
+        map_udf = F.udf(lambda x:tmp.get(x, x))
+        df = df.withColumn(nm, map_udf(nm))
         df = df.withColumn(nm, df[nm].cast('float'))
-        print(nm, ', ', end='')
-        del tmp
+
+        tmp1.unpersist()
+        del tmp,tmp1
         gc.collect()
     return df
 # LABEL ENCODE
@@ -125,6 +136,7 @@ def encode_AG(main_columns, uids,df, aggregations=['mean'],
     # AGGREGATION OF MAIN WITH UID FOR GIVEN STATISTICS
     print('encode_AG')
     for main_column in main_columns:
+        print('encode_AG:{}'.format(main_column))
         for col in uids:
             for agg_type in aggregations:
                 new_col_name = main_column + '_' + col + '_' + agg_type
@@ -133,40 +145,49 @@ def encode_AG(main_columns, uids,df, aggregations=['mean'],
                     df = df.withColumn(main_column + 'new', F.when(df[main_column]!= -1, df[main_column]).otherwise(np.nan)).drop(df[main_column]) \
                         .withColumnRenamed(main_column + 'new',main_column)
 
-                tmp = df.groupBy(col).agg({main_column:agg_type})
-                tmp_name = tmp.columns[1]
-                ###############这一段主要是生成map需要用的字典，所以需要topandas获得具体的值存入内存中，然后用来生成字典
-                tmp = tmp.withColumnRenamed(tmp_name,new_col_name)
-                tmp = tmp.toPandas()
-                tmp = dict(zip([str(i) for i in tmp[col]], [str(i) for i in tmp[new_col_name]]))
+                tmp1 = df.groupBy(col).agg({main_column:agg_type})
+                tmp_name = tmp1.columns[1]
+                tmp1 = tmp1.withColumnRenamed(tmp_name,new_col_name)
+
+                tmp = tmp1.collect()
+                tmp = dict(zip([str(i[0]) for i in tmp], [str(i[1]) for i in tmp]))
                 df = df.withColumn(new_col_name, df[col].cast('string'))
-                # 这里相当于pandas里面，df.map(dict)的效果。
-                df = df.replace(to_replace=tmp, subset=[new_col_name])
+
+                map_udf = F.udf(lambda x: tmp.get(x, x))
+                df = df.withColumn(new_col_name, map_udf(new_col_name))
                 df = df.withColumn(new_col_name, df[new_col_name].cast('float'))
                 if fillna:
                     df = df.fillna({new_col_name:-1})
-                return  df
+                tmp1.unpersist()
+                del tmp1,tmp
+                gc.collect()
+    return  df
 # GROUP AGGREGATION NUNIQUE
 def encode_AG2(main_columns, uids, df):
     print('encode_AG2')
     for main_column in main_columns:
+        print('encode_AG2:{}'.format(main_column))
         for col in uids:
-            tmp = df.groupby(col).agg(F.expr('count(distinct {})'.format(main_column)).alias('nunique'))
-            ###############这一段主要是生成map需要用的字典，所以需要topandas获得具体的值存入内存中，然后用来生成字典
-            tmp = tmp.toPandas()
-            tmp = dict(zip([str(i) for i in tmp[col]], [str(i) for i in tmp['nunique']]))
+            tmp1 = df.groupby(col).agg(F.expr('count(distinct {})'.format(main_column)).alias('nunique'))
+            # tmp = tmp1.toPandas()
+            tmp = tmp1.collect()
+            tmp = dict(zip([str(i[0]) for i in tmp], [str(i[1]) for i in tmp]))
             df = df.withColumn(col + '_' + main_column + '_ct', df[col].cast('string'))
-            # 这里相当于pandas里面，df.map(dict)的效果。
-            df = df.replace(to_replace=tmp, subset=[col + '_' + main_column + '_ct'])
+            map_udf = F.udf(lambda x:tmp.get(x, x))
+            df = df.withColumn(col + '_' + main_column + '_ct', map_udf(col + '_' + main_column + '_ct'))
             df = df.withColumn(col + '_' + main_column + '_ct', df[col + '_' + main_column + '_ct'].cast('float'))
-            return df
+            tmp1.unpersist()
+            del tmp1,tmp
+            gc.collect()
+    return df
 def main(path = None,run_mode = 'standalone',debug = True):
     if(run_mode == 'standalone'):
         conf = SparkConf()
+        # 问题10：默认arrow的优化是关闭的，这里需要手动打开，后面没用topandas了这个设置可以取消，放这里做个记录
         conf.set('spark.sql.execute.arrow.enabled', 'true')
         conf.setAppName('train').setMaster('spark://aigege-OMEN-by-HP-Laptop-15-dc0xxx:7077').set(
-            "spark.executor.memory", '1g').set("spark.sql.execution.arrow.enabled", "true").set("spark.sql.crossJoin.enabled", "true")\
-            .set("spark.executor.instances", "4").set("spark.executor.cores", "3");
+            "spark.executor.memory", '3g').set("spark.sql.execution.arrow.enabled", "true").set("spark.sql.crossJoin.enabled", "true")\
+            .set("spark.executor.instances", "1").set("spark.executor.cores", "2")
         #问题1：刚开始用Pyspark,发现伪分布式下面，默认读取所有core，比如我的电脑是12，然后executor直接通过spark的配置文件spark-env.sh无法修改，总是只有一个executor，里面的
         # SPARK_WORKER_MEMORY, to set how much total memory workers have to give executors，设置了以后是整个worker的memory，executor默认1024mb，所以下面的.config('spark.executor.memory',
         # '5g')可以设置较大的executor内存,其他的参数类似config('spark.num.executors', '2').config('spark.executor.cores', '6')都可以使用，按需选择即可
@@ -205,7 +226,7 @@ def main(path = None,run_mode = 'standalone',debug = True):
                                      inferSchema=True).select(cols + ['isFraud'])
         train_id = spark.read.csv(path=path+'train_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
         X_train = X_train.join(train_id, on='TransactionID', how='left')
-        print(X_train.dtypes)
+
         # LOAD TEST
         if debug:
             X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
@@ -226,6 +247,8 @@ def main(path = None,run_mode = 'standalone',debug = True):
         X_train = X_train.select([col(column).cast('string') if dtypes[column]=='string' else col(column) for column in X_train.columns ])
         X_train = X_train.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_train.columns ])
         print((X_train.count(), len(X_train.columns)))
+        # X_train = X_train.persist(storageLevel=StorageLevel(True, True, False, False, 2))
+        # X_test = X_test.persist(storageLevel=StorageLevel(True, True, False, False, 2))
         # X_train.show()
         # print(X_train.dtypes)
     with timer("Data Preprocess"):
@@ -248,11 +271,14 @@ def main(path = None,run_mode = 'standalone',debug = True):
         # 元素的内部结构有完全的知情权。导致出现ValueError: Some of types cannot be determined by the first 100 rows的错误。最后选择
         #的方法是用limit(n)和subtract来达到train和test在和并编码完成以后再分开的效果。
          # LABEL ENCODE AND MEMORY REDUCE
-        print(X_train.count(), len(X_train.columns))
-        print(X_test.count(), len(X_test.columns))
+        X_train = X_train.withColumn('train_label',X_train['card1']*0+1)
+        X_test = X_test.withColumn('train_label', X_test['card1']*0)
         df_comb = X_train.union(X_test)
-        ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain']
+        # df_comb.show(100)
+        ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain', 'dist1']
         for i,f in enumerate(X_train.columns):
+            if f == 'train_label':
+                continue
              # FACTORIZE CATEGORICAL VARIABLES
             if (np.str(col_type[f])=='string'):
                 print(f)
@@ -287,8 +313,12 @@ def main(path = None,run_mode = 'standalone',debug = True):
         # 问题7：对列名批量重命名，一开始是准备使用withcolumnrename，然后将变量名生成的字典传进去作为参数，类似{‘old nmae’：‘new name’，。。。}
         # 但是发现这个api这样用无效，后面就在stackoverflow找了下面这种曲线救国的方式来批量重命名，效果和pandas rename一样。
         df_comb = df_comb.select([col(c).alias(rename_col.get(c, c)) for c in df_comb.columns])
-        X_train = df_comb.limit(X_train.count())
-        X_test = df_comb.exceptAll(X_train)
+        # X_train = df_comb.limit(X_train.count())
+        X_train = df_comb.filter('train_label == 1')
+        # X_test = df_comb.exceptAll(X_train)
+        X_test = df_comb.filter('train_label == 0')
+        print(X_train.count(), len(X_train.columns))
+        print(X_test.count(), len(X_test.columns))
     with timer("Feature engineering"):
         # TRANSACTION AMT CENTS
         X_train = X_train.withColumn('cents',X_train['TransactionAmt'] - F.floor(X_train['TransactionAmt']))
@@ -310,6 +340,7 @@ def main(path = None,run_mode = 'standalone',debug = True):
         ## X_train['DT_M'] = X_train['TransactionDT'].apply(lambda x: (START_DATE + datetime.timedelta(seconds=x)))
         date_udf = F.udf(lambda x: START_DATE + datetime.timedelta(seconds=x), TimestampType())
         df_comb = df_comb.withColumn('DT_M',date_udf('TransactionDT'))
+
         ## X_train['DT_M'] = (X_train['DT_M'].dt.year - 2017) * 12 + X_train['DT_M'].dt.month
         month_udf = F.udf(lambda x: x.month, IntegerType())
         year_udf = F.udf(lambda x:x.year, IntegerType())
@@ -318,7 +349,7 @@ def main(path = None,run_mode = 'standalone',debug = True):
         # AGGREGATE
         df_comb = df_comb.withColumn('day',df_comb['TransactionDT']/ (24 * 60 * 60))
         df_comb = df_comb.withColumn('uid', F.format_string('%s_%s', df_comb['card1_addr1'].cast('string'), F.floor(df_comb['day']-df_comb['D1'])))
-        df_comb = encode_AG2(['P_emaildomain','dist1','DT_M','id_02','cents'], ['uid'], df_comb)
+        # df_comb = encode_AG2(['P_emaildomain','dist1','DT_M','id_02','cents'], ['uid'], df_comb)
 
         # FREQUENCY ENCODE UID
         df_comb = encode_FE(df_comb,['uid'])
@@ -339,9 +370,11 @@ def main(path = None,run_mode = 'standalone',debug = True):
         df_comb = encode_AG2(['V127', 'V136', 'V309', 'V307', 'V320'], ['uid'], df_comb)
         # NEW FEATURE
         df_comb = df_comb.withColumn('outsider15', F.when(F.abs(df_comb['D1'] - df_comb['D15'])>3,1).otherwise(0))
+        df_comb.show(100)
         print('outsider15')
         cols1 = list(df_comb.columns)
         cols1.remove('TransactionDT')
+        cols1.remove('train_label')
         for c in ['D6', 'D7', 'D8', 'D9', 'D12', 'D13', 'D14']:
             cols1.remove(c)
         for c in ['DT_M', 'day', 'uid']:
@@ -355,17 +388,60 @@ def main(path = None,run_mode = 'standalone',debug = True):
         for c in ['id_' + str(x) for x in range(22, 28)]:
             cols1.remove(c)
         print('NOW USING THE FOLLOWING', len(cols1), 'FEATURES.')
-        X_train = df_comb.limit(X_train.count())
-        X_test = df_comb.exceptAll(X_train)
+        # X_train = df_comb.limit(X_train.count())
+        # X_test = df_comb.exceptAll(X_train)
+        X_train = df_comb.filter('train_label == 1')
+        X_test = df_comb.filter('train_label == 0')
+        print(X_test.count())
         print(X_test.dtypes)
         print(X_train.dtypes)
         print((X_test.count(), len(X_test.columns)))
         print((X_train.count(), len(X_train.columns)))
-        X_train.write.mode('overwrite').csv(path+'X_train.csv',header='true')
-        X_test.write.mode('overwrite').csv(path + 'X_test.csv',header='true')
-        y_train = X_train.join(y_train, on='TransactionID', how='left')
-        y_train.write.mode('overwrite').csv(path + 'XY_train.csv', header='true')
+        print(X_train.columns)
+        # X_train.write.mode('overwrite').csv(path+'X_train.csv',header='true')
+        # X_test.write.mode('overwrite').csv(path + 'X_test.csv',header='true')
+        # y_train = X_train.join(y_train, on='TransactionID', how='left')
+        # y_train.write.mode('overwrite').csv(path + 'XY_train.csv', header='true')
+
+
+    # with timer("model train test:"):
+    #     # LOAD TRAIN
+    #     cols_float = cols.copy()
+    #     cols_float.remove('TransactionID')
+    #     row_nums = 1000
+    #     # 问题2：直接用read.csv的默认参数读取hdfs上面的csv，会导致所有列的类型被读取为string，需要设置inferSchema=True，来自动推测列类型，达到pandas的read_csv的效果
+    #     if debug:
+    #         XY_train = spark.read.csv(path=path + 'XY_train.csv', schema=None, sep=',', header=True,
+    #                                  inferSchema=True).limit(row_nums)
+    #     else:
+    #         XY_train = spark.read.csv(path=path + 'XY_train.csv', schema=None, sep=',', header=True,
+    #                                  inferSchema=True)
+    #     X_test = spark.read.csv(path=path+'X_test.csv', schema=None, sep=',', header=True,inferSchema=True)
+    #     print(XY_train.columns)
+    #     print(XY_train.count())
+    #     cols1 = list(XY_train.columns)
+    #     cols1.remove('TransactionDT')
+    #     for c in ['D6', 'D7', 'D8', 'D9', 'D12', 'D13', 'D14']:
+    #         cols1.remove(c)
+    #     for c in ['DT_M', 'day', 'uid']:
+    #         print(c)
+    #         cols1.remove(c)
+    #
+    #     # FAILED TIME CONSISTENCY TEST
+    #     for c in ['C3', 'M5', 'id_08', 'id_33']:
+    #         cols1.remove(c)
+    #     for c in ['card4', 'id_07', 'id_14', 'id_21', 'id_30', 'id_32', 'id_34']:
+    #         cols1.remove(c)
+    #     for c in ['id_' + str(x) for x in range(22, 28)]:
+    #         cols1.remove(c)
+    #     print('NOW USING THE FOLLOWING', len(cols1), 'FEATURES.')
+
+
+
+
+
+
 if __name__ == "__main__":
     path = "hdfs://localhost:9000/user/kaggle_fraud_detection/data/"
     with timer("Full feature select run"):
-        main(path = path,run_mode = 'standalone',debug = False)
+        main(path = path,run_mode = 'standalone',debug = True)
