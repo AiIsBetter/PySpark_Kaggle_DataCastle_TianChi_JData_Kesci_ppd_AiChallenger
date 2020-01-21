@@ -20,12 +20,17 @@ from pyspark.sql.functions import col
 from pyspark.ml.feature import StringIndexer
 from pyspark.sql import functions as F
 from pyspark import SparkConf
+
 import pandas as pd
 from pyspark.sql.functions import monotonically_increasing_id
 from pyspark.ml.stat import Summarizer
 from sklearn.model_selection import StratifiedKFold
 import datetime
+import copy
 import os
+# memory = '8g'
+# pyspark_submit_args = ' --driver-memory ' + memory + ' pyspark-shell'
+# os.environ["PYSPARK_SUBMIT_ARGS"] = pyspark_submit_args
 # COLUMNS WITH STRINGS
 str_type = ['ProductCD', 'card4', 'card6', 'P_emaildomain', 'R_emaildomain','M1', 'M2', 'M3', 'M4','M5',
             'M6', 'M7', 'M8', 'M9', 'id_12', 'id_15', 'id_16', 'id_23', 'id_27', 'id_28', 'id_29', 'id_30',
@@ -72,7 +77,7 @@ cols += ['V'+str(x) for x in v]
 dtypes = {}
 for c in cols+['id_0'+str(x) for x in range(1,10)]+['id_'+str(x) for x in range(10,34)]:
     dtypes[c] = 'float'
-
+dtypes['TransactionID'] = 'int'
 for c in str_type: dtypes[c] = 'string'
 warnings.simplefilter(action='ignore', category=FutureWarning)
 @contextmanager
@@ -88,8 +93,10 @@ def encode_FE(df, cols):
         # 生成对应的每个值的出现频率字典
         tmp1 = df.groupBy(col).count().orderBy('count',ascending = False)
         tmp_sum = tmp1.select(F.sum('count')).collect()[0][0]
-        tmp1 = tmp1.withColumn('count',tmp1['count']/tmp_sum)
-
+        tmp1 = tmp1.withColumn('count',(tmp1['count']/tmp_sum).cast('float'))
+        # tmp1 = tmp1.withColumn(col, tmp1[col].cast('string'))
+        # tmp1 = tmp1.withColumn('count', tmp1['count'].cast('string'))
+        # df = df.withColumn(col,df[col].cast('string'))
         # 问题8：因为使用了toPandas来获取数据，所以需要安装pyarrow这个包，我一开始安装pyspark的时候没有默认安装，导致每次这一步的时候卡半小时，装了以后就很快了。
         #具体参考spark官网关于arrow加速的章节。
         # 最终发现，collect的速度比topandas快了几十倍，而且topandas容易内存爆炸，所以还是选择了collect来获取数据。
@@ -137,6 +144,8 @@ def encode_AG(main_columns, uids,df, aggregations=['mean'],
     print('encode_AG')
     for main_column in main_columns:
         print('encode_AG:{}'.format(main_column))
+        # if main_column=='M4':
+        #     continue
         for col in uids:
             for agg_type in aggregations:
                 new_col_name = main_column + '_' + col + '_' + agg_type
@@ -186,8 +195,11 @@ def main(path = None,run_mode = 'standalone',debug = True):
         # 问题10：默认arrow的优化是关闭的，这里需要手动打开，后面没用topandas了这个设置可以取消，放这里做个记录
         conf.set('spark.sql.execute.arrow.enabled', 'true')
         conf.setAppName('train').setMaster('spark://aigege-OMEN-by-HP-Laptop-15-dc0xxx:7077').set(
-            "spark.executor.memory", '3g').set("spark.sql.execution.arrow.enabled", "true").set("spark.sql.crossJoin.enabled", "true")\
-            .set("spark.executor.instances", "1").set("spark.executor.cores", "2")
+            "spark.executor.memory", '2g').set("spark.sql.execution.arrow.enabled", "true").set("spark.sql.crossJoin.enabled", "true")\
+            .set("spark.executor.instances", "1").set("spark.executor.cores", "2").set('spark.sql.autoBroadcastJoinThreshold','-1')\
+        .set("spark.driver.memory", '8g').set("spark.jars.packages", "com.microsoft.ml.spark:mmlspark_2.11:1.0.0-rc1").set('spark.network.timeout','1200')\
+        .set('spark.speculation','true')
+
         #问题1：刚开始用Pyspark,发现伪分布式下面，默认读取所有core，比如我的电脑是12，然后executor直接通过spark的配置文件spark-env.sh无法修改，总是只有一个executor，里面的
         # SPARK_WORKER_MEMORY, to set how much total memory workers have to give executors，设置了以后是整个worker的memory，executor默认1024mb，所以下面的.config('spark.executor.memory',
         # '5g')可以设置较大的executor内存,其他的参数类似config('spark.num.executors', '2').config('spark.executor.cores', '6')都可以使用，按需选择即可
@@ -226,7 +238,6 @@ def main(path = None,run_mode = 'standalone',debug = True):
                                      inferSchema=True).select(cols + ['isFraud'])
         train_id = spark.read.csv(path=path+'train_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
         X_train = X_train.join(train_id, on='TransactionID', how='left')
-
         # LOAD TEST
         if debug:
             X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
@@ -236,23 +247,27 @@ def main(path = None,run_mode = 'standalone',debug = True):
                                     inferSchema=True).select(cols)
         test_id = spark.read.csv(path=path+'test_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
         X_test = X_test.join(test_id, on='TransactionID', how='left')
+
         # TARGET
-        y_train = X_train[['TransactionID','isFraud']]
+        y_train = X_train.select(*['TransactionID','isFraud'])
         X_train = X_train.drop('isFraud')
         # 修改列类型
         X_test = X_test.select([col(column).cast('string') if dtypes[column]=='string'  else col(column) for column in X_test.columns ])
         X_test = X_test.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_test.columns ])
         print((X_test.count(), len(X_test.columns)))
-        print(X_train.dtypes)
+
         X_train = X_train.select([col(column).cast('string') if dtypes[column]=='string' else col(column) for column in X_train.columns ])
         X_train = X_train.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_train.columns ])
         print((X_train.count(), len(X_train.columns)))
+
+
         # X_train = X_train.persist(storageLevel=StorageLevel(True, True, False, False, 2))
         # X_test = X_test.persist(storageLevel=StorageLevel(True, True, False, False, 2))
         # X_train.show()
         # print(X_train.dtypes)
     with timer("Data Preprocess"):
         # NORMALIZE D COLUMNS
+
         for i in range(1, 16):
             if i in [1, 2, 3, 5, 9]: continue
             # 问题3：Pyspark不能除以numpy.float32,会报错，上网查了下，说是两种type还是不太一样。所以这里直接乘以1.0用python的float，或者改为用np.float64即可
@@ -271,9 +286,11 @@ def main(path = None,run_mode = 'standalone',debug = True):
         # 元素的内部结构有完全的知情权。导致出现ValueError: Some of types cannot be determined by the first 100 rows的错误。最后选择
         #的方法是用limit(n)和subtract来达到train和test在和并编码完成以后再分开的效果。
          # LABEL ENCODE AND MEMORY REDUCE
+
         X_train = X_train.withColumn('train_label',X_train['card1']*0+1)
         X_test = X_test.withColumn('train_label', X_test['card1']*0)
         df_comb = X_train.union(X_test)
+
         # df_comb.show(100)
         ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain', 'dist1']
         for i,f in enumerate(X_train.columns):
@@ -304,8 +321,9 @@ def main(path = None,run_mode = 'standalone',debug = True):
             elif f not in ['TransactionAmt', 'TransactionDT','TransactionID']:
                 print(f)
                 min_tmp = df_comb.agg({f: "min"}).collect()[0][0]
-                df_comb = df_comb.withColumn(f,df_comb[f]-min_tmp)
+                df_comb = df_comb.withColumn(f,(df_comb[f]-min_tmp).cast('float'))
                 df_comb = df_comb.fillna({f:-1})
+
         rename_col = [name + '_encode' for name in str_type]
         rename_col = dict(zip(rename_col, str_type))
         # 问题6：drop不能像pandas那样，直接drop['a','b'],前面的加*，或者直接一个一个写出，例如：‘a'，’b'
@@ -317,8 +335,13 @@ def main(path = None,run_mode = 'standalone',debug = True):
         X_train = df_comb.filter('train_label == 1')
         # X_test = df_comb.exceptAll(X_train)
         X_test = df_comb.filter('train_label == 0')
+
         print(X_train.count(), len(X_train.columns))
         print(X_test.count(), len(X_test.columns))
+
+        df_comb.unpersist()
+        del df_comb
+        gc.collect()
     with timer("Feature engineering"):
         # TRANSACTION AMT CENTS
         X_train = X_train.withColumn('cents',X_train['TransactionAmt'] - F.floor(X_train['TransactionAmt']))
@@ -398,10 +421,11 @@ def main(path = None,run_mode = 'standalone',debug = True):
         print((X_test.count(), len(X_test.columns)))
         print((X_train.count(), len(X_train.columns)))
         print(X_train.columns)
-        # X_train.write.mode('overwrite').csv(path+'X_train.csv',header='true')
-        # X_test.write.mode('overwrite').csv(path + 'X_test.csv',header='true')
-        # y_train = X_train.join(y_train, on='TransactionID', how='left')
-        # y_train.write.mode('overwrite').csv(path + 'XY_train.csv', header='true')
+        X_train.write.mode('overwrite').csv(path+'X_train.csv',header='true')
+        X_test.write.mode('overwrite').csv(path + 'X_test.csv',header='true')
+        y_train = X_train.join(y_train, on='TransactionID', how='left')
+        y_train.show(10)
+        y_train.write.mode('overwrite').csv(path + 'XY_train.csv', header='true')
 
 
     # with timer("model train test:"):
@@ -435,13 +459,18 @@ def main(path = None,run_mode = 'standalone',debug = True):
     #     for c in ['id_' + str(x) for x in range(22, 28)]:
     #         cols1.remove(c)
     #     print('NOW USING THE FOLLOWING', len(cols1), 'FEATURES.')
-
-
-
-
+    #     train, test = XY_train.randomSplit([0.8, 0.2], seed=2019)
+    #     train.show(100)
+    #
+    #     from mmlspark.lightgbm import LightGBMClassifier
+    #     model = LightGBMClassifier(learningRate=0.3,
+    #                                numIterations=100,
+    #                                numLeaves=31,labelCol='isFraud').fit(train[cols1])
+    #     predict = model.transform(test[cols1])
+    #     a = 1
 
 
 if __name__ == "__main__":
     path = "hdfs://localhost:9000/user/kaggle_fraud_detection/data/"
     with timer("Full feature select run"):
-        main(path = path,run_mode = 'standalone',debug = True)
+        main(path = path,run_mode = 'standalone',debug = False)
