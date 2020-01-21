@@ -193,6 +193,7 @@ def main(path = None,run_mode = 'standalone',debug = True):
     if(run_mode == 'standalone'):
         conf = SparkConf()
         # 问题10：默认arrow的优化是关闭的，这里需要手动打开，后面没用topandas了这个设置可以取消，放这里做个记录
+        # 问题11：增加了spark.driver.memory，之前一直oom，JGC overhead limit exceeded，java head space之类的，后面把这个显示设置大一点就好了，conf文件里面写的分布式模式才有效，其实standalone模式也需要设置。
         conf.set('spark.sql.execute.arrow.enabled', 'true')
         conf.setAppName('train').setMaster('spark://aigege-OMEN-by-HP-Laptop-15-dc0xxx:7077').set(
             "spark.executor.memory", '2g').set("spark.sql.execution.arrow.enabled", "true").set("spark.sql.crossJoin.enabled", "true")\
