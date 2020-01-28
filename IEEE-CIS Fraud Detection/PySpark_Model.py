@@ -8,6 +8,8 @@ Code: https://github.com/AiIsBetter
 # os.environ['PYSPARK_PYTHON'] = '/home/aigege/.conda/envs/py3-conda/bin/python3.6'
 from pyspark import SparkContext,SparkConf
 from pyspark.sql import SparkSession
+from pyspark.ml.feature import VectorAssembler
+from pyspark.mllib.evaluation import BinaryClassificationMetrics
 from pyspark.storagelevel import StorageLevel
 from pyspark import storagelevel
 from pyspark.sql.types import TimestampType,FloatType,IntegerType
@@ -20,7 +22,7 @@ from pyspark.sql.functions import col
 from pyspark.ml.feature import StringIndexer
 from pyspark.sql import functions as F
 from pyspark import SparkConf
-
+from sklearn.metrics import roc_auc_score
 import pandas as pd
 from pyspark.sql.functions import monotonically_increasing_id
 from pyspark.ml.stat import Summarizer
@@ -93,7 +95,9 @@ def encode_FE(df, cols):
         # 生成对应的每个值的出现频率字典
         tmp1 = df.groupBy(col).count().orderBy('count',ascending = False)
         tmp_sum = tmp1.select(F.sum('count')).collect()[0][0]
+
         tmp1 = tmp1.withColumn('count',(tmp1['count']/tmp_sum).cast('float'))
+
         # tmp1 = tmp1.withColumn(col, tmp1[col].cast('string'))
         # tmp1 = tmp1.withColumn('count', tmp1['count'].cast('string'))
         # df = df.withColumn(col,df[col].cast('string'))
@@ -101,6 +105,7 @@ def encode_FE(df, cols):
         #具体参考spark官网关于arrow加速的章节。
         # 最终发现，collect的速度比topandas快了几十倍，而且topandas容易内存爆炸，所以还是选择了collect来获取数据。
         tmp = tmp1.collect()
+
         # tmp2 = tmp1.toPandas()
         tmp = dict(zip([str(i[0]) for i in tmp], [str(i[1]) for i in tmp]))
 
@@ -196,10 +201,12 @@ def main(path = None,run_mode = 'standalone',debug = True):
         # 问题11：增加了spark.driver.memory，之前一直oom，JGC overhead limit exceeded，java head space之类的，后面把这个显示设置大一点就好了，conf文件里面写的分布式模式才有效，其实standalone模式也需要设置。
         conf.set('spark.sql.execute.arrow.enabled', 'true')
         conf.setAppName('train').setMaster('spark://aigege-OMEN-by-HP-Laptop-15-dc0xxx:7077').set(
-            "spark.executor.memory", '2g').set("spark.sql.execution.arrow.enabled", "true").set("spark.sql.crossJoin.enabled", "true")\
-            .set("spark.executor.instances", "1").set("spark.executor.cores", "2").set('spark.sql.autoBroadcastJoinThreshold','-1')\
+            "spark.executor.memory", '3g').set("spark.sql.execution.arrow.enabled", "true").set("spark.sql.crossJoin.enabled", "true")\
+            .set("spark.executor.instances", "1").set("spark.executor.cores", "6").set('spark.sql.autoBroadcastJoinThreshold','-1')\
         .set("spark.driver.memory", '8g').set("spark.jars.packages", "com.microsoft.ml.spark:mmlspark_2.11:1.0.0-rc1").set('spark.network.timeout','1200')\
-        .set('spark.speculation','true')
+        .set('spark.speculation','true').set('spark.sql.shuffle.partitions','500')
+        # .set('spark.ui.showConsoleProgress', 'false')
+
 
         #问题1：刚开始用Pyspark,发现伪分布式下面，默认读取所有core，比如我的电脑是12，然后executor直接通过spark的配置文件spark-env.sh无法修改，总是只有一个executor，里面的
         # SPARK_WORKER_MEMORY, to set how much total memory workers have to give executors，设置了以后是整个worker的memory，executor默认1024mb，所以下面的.config('spark.executor.memory',
@@ -233,7 +240,8 @@ def main(path = None,run_mode = 'standalone',debug = True):
         # 问题2：直接用read.csv的默认参数读取hdfs上面的csv，会导致所有列的类型被读取为string，需要设置inferSchema=True，来自动推测列类型，达到pandas的read_csv的效果
         if debug:
             X_train = spark.read.csv(path=path + 'train_transaction.csv', schema=None, sep=',', header=True,
-                                     inferSchema=True).select(cols + ['isFraud']).limit(row_nums)
+                                     inferSchema=True).select(cols + ['isFraud'])
+            X_train = X_train.sample(fraction=0.1, seed=2020)
         else:
             X_train = spark.read.csv(path=path + 'train_transaction.csv', schema=None, sep=',', header=True,
                                      inferSchema=True).select(cols + ['isFraud'])
@@ -242,7 +250,8 @@ def main(path = None,run_mode = 'standalone',debug = True):
         # LOAD TEST
         if debug:
             X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
-                                    inferSchema=True).select(cols).limit(row_nums)
+                                    inferSchema=True).select(cols)
+            X_test = X_test.sample(fraction=0.1, seed=2020)
         else:
             X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
                                     inferSchema=True).select(cols)
@@ -290,6 +299,7 @@ def main(path = None,run_mode = 'standalone',debug = True):
 
         X_train = X_train.withColumn('train_label',X_train['card1']*0+1)
         X_test = X_test.withColumn('train_label', X_test['card1']*0)
+
         df_comb = X_train.union(X_test)
 
         # df_comb.show(100)
@@ -336,7 +346,6 @@ def main(path = None,run_mode = 'standalone',debug = True):
         X_train = df_comb.filter('train_label == 1')
         # X_test = df_comb.exceptAll(X_train)
         X_test = df_comb.filter('train_label == 0')
-
         print(X_train.count(), len(X_train.columns))
         print(X_test.count(), len(X_test.columns))
 
@@ -422,53 +431,85 @@ def main(path = None,run_mode = 'standalone',debug = True):
         print((X_test.count(), len(X_test.columns)))
         print((X_train.count(), len(X_train.columns)))
         print(X_train.columns)
-        X_train.write.mode('overwrite').csv(path+'X_train.csv',header='true')
-        X_test.write.mode('overwrite').csv(path + 'X_test.csv',header='true')
-        y_train = X_train.join(y_train, on='TransactionID', how='left')
-        y_train.show(10)
-        y_train.write.mode('overwrite').csv(path + 'XY_train.csv', header='true')
+        # X_train.write.mode('overwrite').csv(path+'X_train.csv',header='true')
+        # X_test.write.mode('overwrite').csv(path + 'X_test.csv',header='true')
+        XY_train = X_train.join(y_train, on='TransactionID', how='left')
+        XY_train.show(10)
+        # XY_train.write.mode('overwrite').csv(path + 'XY_train.csv', header='true')
+        del X_train,X_test,
+        gc.collect()
 
+    with timer("model train test:"):
+        # LOAD TRAIN
+        cols_float = cols.copy()
+        cols_float.remove('TransactionID')
+        row_nums = 1000
+        # 问题2：直接用read.csv的默认参数读取hdfs上面的csv，会导致所有列的类型被读取为string，需要设置inferSchema=True，来自动推测列类型，达到pandas的read_csv的效果
+        # if debug:
+        #     XY_train = spark.read.csv(path=path + 'XY_train.csv', schema=None, sep=',', header=True,
+        #                              inferSchema=True)
+        #     XY_train = XY_train.sample(fraction=0.1, seed=2020)
+        # else:
+        #     XY_train = spark.read.csv(path=path + 'XY_train.csv', schema=None, sep=',', header=True,
+        #                              inferSchema=True)
+        # X_test = spark.read.csv(path=path+'X_test.csv', schema=None, sep=',', header=True,inferSchema=True)
+        print(XY_train.columns)
+        print(XY_train.count())
+        cols1 = list(XY_train.columns)
+        cols1.remove('TransactionDT')
+        for c in ['D6', 'D7', 'D8', 'D9', 'D12', 'D13', 'D14']:
+            cols1.remove(c)
+        for c in ['DT_M', 'day', 'uid']:
+            print(c)
+            cols1.remove(c)
 
-    # with timer("model train test:"):
-    #     # LOAD TRAIN
-    #     cols_float = cols.copy()
-    #     cols_float.remove('TransactionID')
-    #     row_nums = 1000
-    #     # 问题2：直接用read.csv的默认参数读取hdfs上面的csv，会导致所有列的类型被读取为string，需要设置inferSchema=True，来自动推测列类型，达到pandas的read_csv的效果
-    #     if debug:
-    #         XY_train = spark.read.csv(path=path + 'XY_train.csv', schema=None, sep=',', header=True,
-    #                                  inferSchema=True).limit(row_nums)
-    #     else:
-    #         XY_train = spark.read.csv(path=path + 'XY_train.csv', schema=None, sep=',', header=True,
-    #                                  inferSchema=True)
-    #     X_test = spark.read.csv(path=path+'X_test.csv', schema=None, sep=',', header=True,inferSchema=True)
-    #     print(XY_train.columns)
-    #     print(XY_train.count())
-    #     cols1 = list(XY_train.columns)
-    #     cols1.remove('TransactionDT')
-    #     for c in ['D6', 'D7', 'D8', 'D9', 'D12', 'D13', 'D14']:
-    #         cols1.remove(c)
-    #     for c in ['DT_M', 'day', 'uid']:
-    #         print(c)
-    #         cols1.remove(c)
-    #
-    #     # FAILED TIME CONSISTENCY TEST
-    #     for c in ['C3', 'M5', 'id_08', 'id_33']:
-    #         cols1.remove(c)
-    #     for c in ['card4', 'id_07', 'id_14', 'id_21', 'id_30', 'id_32', 'id_34']:
-    #         cols1.remove(c)
-    #     for c in ['id_' + str(x) for x in range(22, 28)]:
-    #         cols1.remove(c)
-    #     print('NOW USING THE FOLLOWING', len(cols1), 'FEATURES.')
-    #     train, test = XY_train.randomSplit([0.8, 0.2], seed=2019)
-    #     train.show(100)
-    #
-    #     from mmlspark.lightgbm import LightGBMClassifier
-    #     model = LightGBMClassifier(learningRate=0.3,
-    #                                numIterations=100,
-    #                                numLeaves=31,labelCol='isFraud').fit(train[cols1])
-    #     predict = model.transform(test[cols1])
-    #     a = 1
+        # FAILED TIME CONSISTENCY TEST
+        for c in ['C3', 'M5', 'id_08', 'id_33']:
+            cols1.remove(c)
+        for c in ['card4', 'id_07', 'id_14', 'id_21', 'id_30', 'id_32', 'id_34']:
+            cols1.remove(c)
+        for c in ['id_' + str(x) for x in range(22, 28)]:
+            cols1.remove(c)
+
+        for c in ['train_label', 'ProductCD', 'TransactionID']:
+            print(c)
+            cols1.remove(c)
+
+        print('NOW USING THE FOLLOWING', len(cols1), 'FEATURES.')
+        XY_train = XY_train.fillna(0)
+        train, test = XY_train.randomSplit([0.8, 0.2], seed=2019)
+        print('~~~~~~~~~~~~~',test.count())
+        # train.show(100)
+        for i in cols1:
+            if i not in train.columns:
+                print(i)
+        cols1.remove('isFraud')
+        featurizer = VectorAssembler(
+            inputCols=cols1,
+            outputCol='features'
+        )
+        # 问题12：此处后面的‘features’列对应于VectorAssembler里面的inputCols里面所有的列，全部会合并到‘features’里面变为一个向量，spark训练要求使用此种格式传入，不然会报错，找不到features列，
+        # 剩余的列用于训练后评估指标。验证集的处理方式一样
+        train_data = featurizer.transform(train)['TransactionID', 'features','isFraud']
+        featurizer = VectorAssembler(
+            inputCols=cols1,
+            outputCol='features'
+        )
+        test_data = featurizer.transform(test)['TransactionID','features','isFraud']
+        print(test_data.count(),len(test_data.columns))
+        from mmlspark.lightgbm import LightGBMClassifier
+        model = LightGBMClassifier(learningRate=0.05,
+                                   numIterations=400,isUnbalance = True
+                                   numLeaves=31,labelCol='isFraud').fit(train_data)
+        print('train finish')
+        predict = model.transform(test_data)['prediction','isFraud','probability','rawPrediction']
+        print('ppredict finish')
+        predict = predict.toPandas()
+        def dense_to_num(x):
+            a = x.values[1]
+            return a
+        predict['probability'] = predict['probability'].apply(dense_to_num)
+        print(roc_auc_score(predict['isFraud'],predict['probability']))
 
 
 if __name__ == "__main__":
