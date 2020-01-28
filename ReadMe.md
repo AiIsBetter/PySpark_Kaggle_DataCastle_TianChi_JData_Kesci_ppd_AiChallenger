@@ -32,6 +32,7 @@
 
 
 ## 进度
-<p> 本项目目前在尝试编写中,如果中途遇到问题进行不下去就停止了,目前先建个仓库,来督促下自己.
-<p> 目前选择Kaggle比赛,IEEE-CIS Fraud Detection,选择了top1分享的方案,进行中...;;
+<p> 1.Kaggle IEEE-CIS Fraud Detection 完成
+
+
 

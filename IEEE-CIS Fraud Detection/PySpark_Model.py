@@ -194,7 +194,7 @@ def encode_AG2(main_columns, uids, df):
             del tmp1,tmp
             gc.collect()
     return df
-def main(path = None,run_mode = 'standalone',debug = True):
+def main(path = None,run_mode = 'standalone',step = 1,debug = True):
     if(run_mode == 'standalone'):
         conf = SparkConf()
         # 问题10：默认arrow的优化是关闭的，这里需要手动打开，后面没用topandas了这个设置可以取消，放这里做个记录
@@ -232,287 +232,287 @@ def main(path = None,run_mode = 'standalone',debug = True):
     elif(run_mode == 'online'):
         spark = SparkSession.builder.appName(
             'test').getOrCreate()
-    with timer("Load data finish:"):
-        # LOAD TRAIN
-        cols_float = cols.copy()
-        cols_float.remove('TransactionID')
-        row_nums = 1000
-        # 问题2：直接用read.csv的默认参数读取hdfs上面的csv，会导致所有列的类型被读取为string，需要设置inferSchema=True，来自动推测列类型，达到pandas的read_csv的效果
-        if debug:
-            X_train = spark.read.csv(path=path + 'train_transaction.csv', schema=None, sep=',', header=True,
-                                     inferSchema=True).select(cols + ['isFraud'])
-            X_train = X_train.sample(fraction=0.1, seed=2020)
-        else:
-            X_train = spark.read.csv(path=path + 'train_transaction.csv', schema=None, sep=',', header=True,
-                                     inferSchema=True).select(cols + ['isFraud'])
-        train_id = spark.read.csv(path=path+'train_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
-        X_train = X_train.join(train_id, on='TransactionID', how='left')
-        # LOAD TEST
-        if debug:
-            X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
-                                    inferSchema=True).select(cols)
-            X_test = X_test.sample(fraction=0.1, seed=2020)
-        else:
-            X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
-                                    inferSchema=True).select(cols)
-        test_id = spark.read.csv(path=path+'test_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
-        X_test = X_test.join(test_id, on='TransactionID', how='left')
+    if step ==1:
+        with timer("Load data finish:"):
+            # LOAD TRAIN
+            cols_float = cols.copy()
+            cols_float.remove('TransactionID')
+            row_nums = 1000
+            # 问题2：直接用read.csv的默认参数读取hdfs上面的csv，会导致所有列的类型被读取为string，需要设置inferSchema=True，来自动推测列类型，达到pandas的read_csv的效果
+            if debug:
+                X_train = spark.read.csv(path=path + 'train_transaction.csv', schema=None, sep=',', header=True,
+                                         inferSchema=True).select(cols + ['isFraud'])
+                X_train = X_train.sample(fraction=0.1, seed=2020)
+            else:
+                X_train = spark.read.csv(path=path + 'train_transaction.csv', schema=None, sep=',', header=True,
+                                         inferSchema=True).select(cols + ['isFraud'])
+            train_id = spark.read.csv(path=path+'train_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
+            X_train = X_train.join(train_id, on='TransactionID', how='left')
+            # LOAD TEST
+            if debug:
+                X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
+                                        inferSchema=True).select(cols)
+                X_test = X_test.sample(fraction=0.1, seed=2020)
+            else:
+                X_test = spark.read.csv(path=path + 'test_transaction.csv', schema=None, sep=',', header=True,
+                                        inferSchema=True).select(cols)
+            test_id = spark.read.csv(path=path+'test_identity.csv', schema=None, sep=',', header=True,inferSchema=True)
+            X_test = X_test.join(test_id, on='TransactionID', how='left')
 
-        # TARGET
-        y_train = X_train.select(*['TransactionID','isFraud'])
-        X_train = X_train.drop('isFraud')
-        # 修改列类型
-        X_test = X_test.select([col(column).cast('string') if dtypes[column]=='string'  else col(column) for column in X_test.columns ])
-        X_test = X_test.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_test.columns ])
-        print((X_test.count(), len(X_test.columns)))
+            # TARGET
+            y_train = X_train.select(*['TransactionID','isFraud'])
+            X_train = X_train.drop('isFraud')
+            # 修改列类型
+            X_test = X_test.select([col(column).cast('string') if dtypes[column]=='string'  else col(column) for column in X_test.columns ])
+            X_test = X_test.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_test.columns ])
+            print((X_test.count(), len(X_test.columns)))
 
-        X_train = X_train.select([col(column).cast('string') if dtypes[column]=='string' else col(column) for column in X_train.columns ])
-        X_train = X_train.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_train.columns ])
-        print((X_train.count(), len(X_train.columns)))
+            X_train = X_train.select([col(column).cast('string') if dtypes[column]=='string' else col(column) for column in X_train.columns ])
+            X_train = X_train.select([col(column).cast('float') if dtypes[column]=='float'  else col(column) for column in X_train.columns ])
+            print((X_train.count(), len(X_train.columns)))
 
 
-        # X_train = X_train.persist(storageLevel=StorageLevel(True, True, False, False, 2))
-        # X_test = X_test.persist(storageLevel=StorageLevel(True, True, False, False, 2))
-        # X_train.show()
-        # print(X_train.dtypes)
-    with timer("Data Preprocess"):
-        # NORMALIZE D COLUMNS
+            # X_train = X_train.persist(storageLevel=StorageLevel(True, True, False, False, 2))
+            # X_test = X_test.persist(storageLevel=StorageLevel(True, True, False, False, 2))
+            # X_train.show()
+            # print(X_train.dtypes)
+        with timer("Data Preprocess"):
+            # NORMALIZE D COLUMNS
 
-        for i in range(1, 16):
-            if i in [1, 2, 3, 5, 9]: continue
-            # 问题3：Pyspark不能除以numpy.float32,会报错，上网查了下，说是两种type还是不太一样。所以这里直接乘以1.0用python的float，或者改为用np.float64即可
-            X_train= X_train.withColumn('D' + str(i),X_train['D' + str(i)] -(X_train['TransactionDT']/ np.float64(24 * 60 * 60)))
-            X_test = X_test.withColumn('D' + str(i),X_test['D' + str(i)] - (X_test['TransactionDT']/  np.float64(24 * 60 * 60)))
-        col_type = dict(X_train.dtypes)
+            for i in range(1, 16):
+                if i in [1, 2, 3, 5, 9]: continue
+                # 问题3：Pyspark不能除以numpy.float32,会报错，上网查了下，说是两种type还是不太一样。所以这里直接乘以1.0用python的float，或者改为用np.float64即可
+                X_train= X_train.withColumn('D' + str(i),X_train['D' + str(i)] -(X_train['TransactionDT']/ np.float64(24 * 60 * 60)))
+                X_test = X_test.withColumn('D' + str(i),X_test['D' + str(i)] - (X_test['TransactionDT']/  np.float64(24 * 60 * 60)))
+            col_type = dict(X_train.dtypes)
 
-        # 问题4：Pyspark没找到直接切片的方法，所以用monotonically_increasing_id函数生产index列，作为后续切片的一句，这种方法产生的
-        #monotonically_increasing_id不是连续递增，而只是保证每个分区里面的id是单调递增的，所以无法保证很好的切分数据，另一种找到的方法是
-        # 创建以下函数
-        # def getrows(df, rownums=None):
-        #     return df.rdd.zipWithIndex().filter(lambda x: x[1] in rownums).map(lambda x: x[0])
-        # 对dataframe切片的函数，比如df[0:100]，跟这种功能类似，rownums可以使用【1,2,3】或者rownums=range(0,X_train.count())来达到
-        # 选取指定行或者指定行范围的切片效果。但是这种方法返回的是rdd，返回以后虽然可以使用toDF来达到转换Dataframe的目的，但是有可能因为
-        #RDD中元素的内部结构是未知的、不明确的，也就是说每个元素里面有哪些字段，每个字段是什么类型，这些都是不知道的，而DataFrame则要求对
-        # 元素的内部结构有完全的知情权。导致出现ValueError: Some of types cannot be determined by the first 100 rows的错误。最后选择
-        #的方法是用limit(n)和subtract来达到train和test在和并编码完成以后再分开的效果。
-         # LABEL ENCODE AND MEMORY REDUCE
+            # 问题4：Pyspark没找到直接切片的方法，所以用monotonically_increasing_id函数生产index列，作为后续切片的一句，这种方法产生的
+            #monotonically_increasing_id不是连续递增，而只是保证每个分区里面的id是单调递增的，所以无法保证很好的切分数据，另一种找到的方法是
+            # 创建以下函数
+            # def getrows(df, rownums=None):
+            #     return df.rdd.zipWithIndex().filter(lambda x: x[1] in rownums).map(lambda x: x[0])
+            # 对dataframe切片的函数，比如df[0:100]，跟这种功能类似，rownums可以使用【1,2,3】或者rownums=range(0,X_train.count())来达到
+            # 选取指定行或者指定行范围的切片效果。但是这种方法返回的是rdd，返回以后虽然可以使用toDF来达到转换Dataframe的目的，但是有可能因为
+            #RDD中元素的内部结构是未知的、不明确的，也就是说每个元素里面有哪些字段，每个字段是什么类型，这些都是不知道的，而DataFrame则要求对
+            # 元素的内部结构有完全的知情权。导致出现ValueError: Some of types cannot be determined by the first 100 rows的错误。最后选择
+            #的方法是用limit(n)和subtract来达到train和test在和并编码完成以后再分开的效果。
+             # LABEL ENCODE AND MEMORY REDUCE
 
-        X_train = X_train.withColumn('train_label',X_train['card1']*0+1)
-        X_test = X_test.withColumn('train_label', X_test['card1']*0)
+            X_train = X_train.withColumn('train_label',X_train['card1']*0+1)
+            X_test = X_test.withColumn('train_label', X_test['card1']*0)
 
-        df_comb = X_train.union(X_test)
+            df_comb = X_train.union(X_test)
 
-        # df_comb.show(100)
-        ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain', 'dist1']
-        for i,f in enumerate(X_train.columns):
-            if f == 'train_label':
-                continue
-             # FACTORIZE CATEGORICAL VARIABLES
-            if (np.str(col_type[f])=='string'):
-                print(f)
-                # 这里是一开始不熟悉Pyspark api，写的效率比较低，留在这里保存下，和后面写法结果是一致的，只是比较慢
-                # df_comb = X_train[[f,'TransactionID']].union(X_test[[f,'TransactionID']])
-                # # df_comb = pd.concat([X_train[f],X_test[f]],axis=0)
-                # stringIndexer = StringIndexer(inputCol=f, outputCol="encode", handleInvalid="keep",
-                # stringOrderType="frequencyDesc")
-                # model = stringIndexer.fit(df_comb)
-                # label_encode = model.transform(df_comb)
-                # label_encode_train = label_encode.limit(X_train.count())
-                # label_encode__test = label_encode.exceptAll(label_encode_train)
-                # # 问题5：本来生成的编码列直接赋值给原来的列就行了，但是spark不支持这种方式，只能拼接进去以后再删除原始列，然后修改列名了，因为没有concat，
-                # #Pyspark里面的concat是直接拼到一列里面，不是pandas那种axis=1然后多出一新列,必须使用join，withColumn只能在本df上面的列上操作后才能直接新增一列，
-                # # 不适用于本情况中其他df中的一列新增
-                # X_train= X_train.join(label_encode_train[["encode",'TransactionID']],how = 'left',on = 'TransactionID').drop(f).withColumnRenamed('encode',f)
-                # X_test = X_test.join(label_encode__test[["encode",'TransactionID']],how = 'left',on = 'TransactionID').drop(f).withColumnRenamed('encode',f)
-                stringIndexer = StringIndexer(inputCol=f, outputCol=f+"_encode", handleInvalid="keep",
-                stringOrderType="frequencyDesc")
-                model = stringIndexer.fit(df_comb)
-                df_comb = model.transform(df_comb)
-                # SHIFT ALL NUMERICS POSITIVE. SET NAN to -1
-            elif f not in ['TransactionAmt', 'TransactionDT','TransactionID']:
-                print(f)
-                min_tmp = df_comb.agg({f: "min"}).collect()[0][0]
-                df_comb = df_comb.withColumn(f,(df_comb[f]-min_tmp).cast('float'))
-                df_comb = df_comb.fillna({f:-1})
+            # df_comb.show(100)
+            ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain', 'dist1']
+            for i,f in enumerate(X_train.columns):
+                if f == 'train_label':
+                    continue
+                 # FACTORIZE CATEGORICAL VARIABLES
+                if (np.str(col_type[f])=='string'):
+                    print(f)
+                    # 这里是一开始不熟悉Pyspark api，写的效率比较低，留在这里保存下，和后面写法结果是一致的，只是比较慢
+                    # df_comb = X_train[[f,'TransactionID']].union(X_test[[f,'TransactionID']])
+                    # # df_comb = pd.concat([X_train[f],X_test[f]],axis=0)
+                    # stringIndexer = StringIndexer(inputCol=f, outputCol="encode", handleInvalid="keep",
+                    # stringOrderType="frequencyDesc")
+                    # model = stringIndexer.fit(df_comb)
+                    # label_encode = model.transform(df_comb)
+                    # label_encode_train = label_encode.limit(X_train.count())
+                    # label_encode__test = label_encode.exceptAll(label_encode_train)
+                    # # 问题5：本来生成的编码列直接赋值给原来的列就行了，但是spark不支持这种方式，只能拼接进去以后再删除原始列，然后修改列名了，因为没有concat，
+                    # #Pyspark里面的concat是直接拼到一列里面，不是pandas那种axis=1然后多出一新列,必须使用join，withColumn只能在本df上面的列上操作后才能直接新增一列，
+                    # # 不适用于本情况中其他df中的一列新增
+                    # X_train= X_train.join(label_encode_train[["encode",'TransactionID']],how = 'left',on = 'TransactionID').drop(f).withColumnRenamed('encode',f)
+                    # X_test = X_test.join(label_encode__test[["encode",'TransactionID']],how = 'left',on = 'TransactionID').drop(f).withColumnRenamed('encode',f)
+                    stringIndexer = StringIndexer(inputCol=f, outputCol=f+"_encode", handleInvalid="keep",
+                    stringOrderType="frequencyDesc")
+                    model = stringIndexer.fit(df_comb)
+                    df_comb = model.transform(df_comb)
+                    # SHIFT ALL NUMERICS POSITIVE. SET NAN to -1
+                elif f not in ['TransactionAmt', 'TransactionDT','TransactionID']:
+                    print(f)
+                    min_tmp = df_comb.agg({f: "min"}).collect()[0][0]
+                    df_comb = df_comb.withColumn(f,(df_comb[f]-min_tmp).cast('float'))
+                    df_comb = df_comb.fillna({f:-1})
 
-        rename_col = [name + '_encode' for name in str_type]
-        rename_col = dict(zip(rename_col, str_type))
-        # 问题6：drop不能像pandas那样，直接drop['a','b'],前面的加*，或者直接一个一个写出，例如：‘a'，’b'
-        df_comb = df_comb.drop(*str_type)
-        # 问题7：对列名批量重命名，一开始是准备使用withcolumnrename，然后将变量名生成的字典传进去作为参数，类似{‘old nmae’：‘new name’，。。。}
-        # 但是发现这个api这样用无效，后面就在stackoverflow找了下面这种曲线救国的方式来批量重命名，效果和pandas rename一样。
-        df_comb = df_comb.select([col(c).alias(rename_col.get(c, c)) for c in df_comb.columns])
-        # X_train = df_comb.limit(X_train.count())
-        X_train = df_comb.filter('train_label == 1')
-        # X_test = df_comb.exceptAll(X_train)
-        X_test = df_comb.filter('train_label == 0')
-        print(X_train.count(), len(X_train.columns))
-        print(X_test.count(), len(X_test.columns))
+            rename_col = [name + '_encode' for name in str_type]
+            rename_col = dict(zip(rename_col, str_type))
+            # 问题6：drop不能像pandas那样，直接drop['a','b'],前面的加*，或者直接一个一个写出，例如：‘a'，’b'
+            df_comb = df_comb.drop(*str_type)
+            # 问题7：对列名批量重命名，一开始是准备使用withcolumnrename，然后将变量名生成的字典传进去作为参数，类似{‘old nmae’：‘new name’，。。。}
+            # 但是发现这个api这样用无效，后面就在stackoverflow找了下面这种曲线救国的方式来批量重命名，效果和pandas rename一样。
+            df_comb = df_comb.select([col(c).alias(rename_col.get(c, c)) for c in df_comb.columns])
+            # X_train = df_comb.limit(X_train.count())
+            X_train = df_comb.filter('train_label == 1')
+            # X_test = df_comb.exceptAll(X_train)
+            X_test = df_comb.filter('train_label == 0')
+            print(X_train.count(), len(X_train.columns))
+            print(X_test.count(), len(X_test.columns))
 
-        df_comb.unpersist()
-        del df_comb
-        gc.collect()
-    with timer("Feature engineering"):
-        # TRANSACTION AMT CENTS
-        X_train = X_train.withColumn('cents',X_train['TransactionAmt'] - F.floor(X_train['TransactionAmt']))
-        X_test = X_test.withColumn('cents',X_test['TransactionAmt'] - F.floor(X_test['TransactionAmt']))
-        df_comb = X_train.union(X_test)
-        # FREQUENCY ENCODE: ADDR1, CARD1, CARD2, CARD3, P_EMAILDOMAIN
-        df_comb = encode_FE(df_comb, ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain'])
-        # COMBINE COLUMNS CARD1+ADDR1, CARD1+ADDR1+P_EMAILDOMAIN
-        df_comb = encode_CB(df_comb,'card1', 'addr1')
-        df_comb = encode_CB(df_comb,'card1_addr1', 'P_emaildomain')
-        # FREQUENCY ENOCDE
-        df_comb = encode_FE(df_comb, ['card1_addr1', 'card1_addr1_P_emaildomain'])
-        # GROUP AGGREGATE
-        df_comb = encode_AG(['TransactionAmt', 'D9', 'D11'], ['card1', 'card1_addr1', 'card1_addr1_P_emaildomain'],df_comb,
-                  ['mean', 'std'], usena=True)
+            df_comb.unpersist()
+            del df_comb
+            gc.collect()
+        with timer("Feature engineering"):
+            # TRANSACTION AMT CENTS
+            X_train = X_train.withColumn('cents',X_train['TransactionAmt'] - F.floor(X_train['TransactionAmt']))
+            X_test = X_test.withColumn('cents',X_test['TransactionAmt'] - F.floor(X_test['TransactionAmt']))
+            df_comb = X_train.union(X_test)
+            # FREQUENCY ENCODE: ADDR1, CARD1, CARD2, CARD3, P_EMAILDOMAIN
+            df_comb = encode_FE(df_comb, ['addr1', 'card1', 'card2', 'card3', 'P_emaildomain'])
+            # COMBINE COLUMNS CARD1+ADDR1, CARD1+ADDR1+P_EMAILDOMAIN
+            df_comb = encode_CB(df_comb,'card1', 'addr1')
+            df_comb = encode_CB(df_comb,'card1_addr1', 'P_emaildomain')
+            # FREQUENCY ENOCDE
+            df_comb = encode_FE(df_comb, ['card1_addr1', 'card1_addr1_P_emaildomain'])
+            # GROUP AGGREGATE
+            df_comb = encode_AG(['TransactionAmt', 'D9', 'D11'], ['card1', 'card1_addr1', 'card1_addr1_P_emaildomain'],df_comb,
+                      ['mean', 'std'], usena=True)
 
-        START_DATE = datetime.datetime.strptime('2017-11-30', '%Y-%m-%d')
-        # 这里是模仿下面两列注释的pandas的写法，因为没找到pandas那样自带的属性，只能自己写自定义udf函数调用。
-        ## X_train['DT_M'] = X_train['TransactionDT'].apply(lambda x: (START_DATE + datetime.timedelta(seconds=x)))
-        date_udf = F.udf(lambda x: START_DATE + datetime.timedelta(seconds=x), TimestampType())
-        df_comb = df_comb.withColumn('DT_M',date_udf('TransactionDT'))
+            START_DATE = datetime.datetime.strptime('2017-11-30', '%Y-%m-%d')
+            # 这里是模仿下面两列注释的pandas的写法，因为没找到pandas那样自带的属性，只能自己写自定义udf函数调用。
+            ## X_train['DT_M'] = X_train['TransactionDT'].apply(lambda x: (START_DATE + datetime.timedelta(seconds=x)))
+            date_udf = F.udf(lambda x: START_DATE + datetime.timedelta(seconds=x), TimestampType())
+            df_comb = df_comb.withColumn('DT_M',date_udf('TransactionDT'))
 
-        ## X_train['DT_M'] = (X_train['DT_M'].dt.year - 2017) * 12 + X_train['DT_M'].dt.month
-        month_udf = F.udf(lambda x: x.month, IntegerType())
-        year_udf = F.udf(lambda x:x.year, IntegerType())
-        df_comb = df_comb.withColumn('DT_M', (year_udf('DT_M')-2017)*12+month_udf('DT_M'))
+            ## X_train['DT_M'] = (X_train['DT_M'].dt.year - 2017) * 12 + X_train['DT_M'].dt.month
+            month_udf = F.udf(lambda x: x.month, IntegerType())
+            year_udf = F.udf(lambda x:x.year, IntegerType())
+            df_comb = df_comb.withColumn('DT_M', (year_udf('DT_M')-2017)*12+month_udf('DT_M'))
 
-        # AGGREGATE
-        df_comb = df_comb.withColumn('day',df_comb['TransactionDT']/ (24 * 60 * 60))
-        df_comb = df_comb.withColumn('uid', F.format_string('%s_%s', df_comb['card1_addr1'].cast('string'), F.floor(df_comb['day']-df_comb['D1'])))
-        # df_comb = encode_AG2(['P_emaildomain','dist1','DT_M','id_02','cents'], ['uid'], df_comb)
+            # AGGREGATE
+            df_comb = df_comb.withColumn('day',df_comb['TransactionDT']/ (24 * 60 * 60))
+            df_comb = df_comb.withColumn('uid', F.format_string('%s_%s', df_comb['card1_addr1'].cast('string'), F.floor(df_comb['day']-df_comb['D1'])))
+            # df_comb = encode_AG2(['P_emaildomain','dist1','DT_M','id_02','cents'], ['uid'], df_comb)
 
-        # FREQUENCY ENCODE UID
-        df_comb = encode_FE(df_comb,['uid'])
-        # AGGREGATE
-        df_comb = encode_AG(['TransactionAmt', 'D4', 'D9', 'D10', 'D15'], ['uid'], df_comb, ['mean', 'std'], fillna=True, usena=True)
-        # AGGREGATE
-        df_comb = encode_AG(['C' + str(x) for x in range(1, 15) if x != 3], ['uid'], df_comb, ['mean'], fillna=True,
-                  usena=True)
-        # AGGREGATE
-        df_comb = encode_AG(['M' + str(x) for x in range(1, 10)], ['uid'], df_comb, ['mean'], fillna=True, usena=True)
-        # AGGREGATE
-        df_comb = encode_AG2(['P_emaildomain', 'dist1', 'DT_M', 'id_02', 'cents'], ['uid'], df_comb)
-        # AGGREGATE
-        df_comb = encode_AG(['C14'], ['uid'], df_comb, ['std'], fillna=True, usena=True)
-        # AGGREGATE
-        df_comb = encode_AG2(['C13', 'V314'], ['uid'], df_comb)
-        # AGGREATE
-        df_comb = encode_AG2(['V127', 'V136', 'V309', 'V307', 'V320'], ['uid'], df_comb)
-        # NEW FEATURE
-        df_comb = df_comb.withColumn('outsider15', F.when(F.abs(df_comb['D1'] - df_comb['D15'])>3,1).otherwise(0))
-        df_comb.show(100)
-        print('outsider15')
-        cols1 = list(df_comb.columns)
-        cols1.remove('TransactionDT')
-        cols1.remove('train_label')
-        for c in ['D6', 'D7', 'D8', 'D9', 'D12', 'D13', 'D14']:
-            cols1.remove(c)
-        for c in ['DT_M', 'day', 'uid']:
-            cols1.remove(c)
+            # FREQUENCY ENCODE UID
+            df_comb = encode_FE(df_comb,['uid'])
+            # AGGREGATE
+            df_comb = encode_AG(['TransactionAmt', 'D4', 'D9', 'D10', 'D15'], ['uid'], df_comb, ['mean', 'std'], fillna=True, usena=True)
+            # AGGREGATE
+            df_comb = encode_AG(['C' + str(x) for x in range(1, 15) if x != 3], ['uid'], df_comb, ['mean'], fillna=True,
+                      usena=True)
+            # AGGREGATE
+            df_comb = encode_AG(['M' + str(x) for x in range(1, 10)], ['uid'], df_comb, ['mean'], fillna=True, usena=True)
+            # AGGREGATE
+            df_comb = encode_AG2(['P_emaildomain', 'dist1', 'DT_M', 'id_02', 'cents'], ['uid'], df_comb)
+            # AGGREGATE
+            df_comb = encode_AG(['C14'], ['uid'], df_comb, ['std'], fillna=True, usena=True)
+            # AGGREGATE
+            df_comb = encode_AG2(['C13', 'V314'], ['uid'], df_comb)
+            # AGGREATE
+            df_comb = encode_AG2(['V127', 'V136', 'V309', 'V307', 'V320'], ['uid'], df_comb)
+            # NEW FEATURE
+            df_comb = df_comb.withColumn('outsider15', F.when(F.abs(df_comb['D1'] - df_comb['D15'])>3,1).otherwise(0))
+            df_comb.show(100)
+            print('outsider15')
+            cols1 = list(df_comb.columns)
+            cols1.remove('TransactionDT')
+            cols1.remove('train_label')
+            for c in ['D6', 'D7', 'D8', 'D9', 'D12', 'D13', 'D14']:
+                cols1.remove(c)
+            for c in ['DT_M', 'day', 'uid']:
+                cols1.remove(c)
 
-        # FAILED TIME CONSISTENCY TEST
-        for c in ['C3', 'M5', 'id_08', 'id_33']:
-            cols1.remove(c)
-        for c in ['card4', 'id_07', 'id_14', 'id_21', 'id_30', 'id_32', 'id_34']:
-            cols1.remove(c)
-        for c in ['id_' + str(x) for x in range(22, 28)]:
-            cols1.remove(c)
-        print('NOW USING THE FOLLOWING', len(cols1), 'FEATURES.')
-        # X_train = df_comb.limit(X_train.count())
-        # X_test = df_comb.exceptAll(X_train)
-        X_train = df_comb.filter('train_label == 1')
-        X_test = df_comb.filter('train_label == 0')
-        print(X_test.count())
-        print(X_test.dtypes)
-        print(X_train.dtypes)
-        print((X_test.count(), len(X_test.columns)))
-        print((X_train.count(), len(X_train.columns)))
-        print(X_train.columns)
-        # X_train.write.mode('overwrite').csv(path+'X_train.csv',header='true')
-        # X_test.write.mode('overwrite').csv(path + 'X_test.csv',header='true')
-        XY_train = X_train.join(y_train, on='TransactionID', how='left')
-        XY_train.show(10)
-        # XY_train.write.mode('overwrite').csv(path + 'XY_train.csv', header='true')
-        del X_train,X_test,
-        gc.collect()
+            # FAILED TIME CONSISTENCY TEST
+            for c in ['C3', 'M5', 'id_08', 'id_33']:
+                cols1.remove(c)
+            for c in ['card4', 'id_07', 'id_14', 'id_21', 'id_30', 'id_32', 'id_34']:
+                cols1.remove(c)
+            for c in ['id_' + str(x) for x in range(22, 28)]:
+                cols1.remove(c)
+            print('NOW USING THE FOLLOWING', len(cols1), 'FEATURES.')
+            # X_train = df_comb.limit(X_train.count())
+            # X_test = df_comb.exceptAll(X_train)
+            X_train = df_comb.filter('train_label == 1')
+            X_test = df_comb.filter('train_label == 0')
+            print(X_test.count())
+            print(X_test.dtypes)
+            print(X_train.dtypes)
+            print((X_test.count(), len(X_test.columns)))
+            print((X_train.count(), len(X_train.columns)))
+            print(X_train.columns)
+            X_train.write.mode('overwrite').csv(path+'X_train.csv',header='true')
+            X_test.write.mode('overwrite').csv(path + 'X_test.csv',header='true')
+            XY_train = X_train.join(y_train, on='TransactionID', how='left')
+            XY_train.show(10)
+            XY_train.write.mode('overwrite').csv(path + 'XY_train.csv', header='true')
 
-    with timer("model train test:"):
-        # LOAD TRAIN
-        cols_float = cols.copy()
-        cols_float.remove('TransactionID')
-        row_nums = 1000
-        # 问题2：直接用read.csv的默认参数读取hdfs上面的csv，会导致所有列的类型被读取为string，需要设置inferSchema=True，来自动推测列类型，达到pandas的read_csv的效果
-        # if debug:
-        #     XY_train = spark.read.csv(path=path + 'XY_train.csv', schema=None, sep=',', header=True,
-        #                              inferSchema=True)
-        #     XY_train = XY_train.sample(fraction=0.1, seed=2020)
-        # else:
-        #     XY_train = spark.read.csv(path=path + 'XY_train.csv', schema=None, sep=',', header=True,
-        #                              inferSchema=True)
-        # X_test = spark.read.csv(path=path+'X_test.csv', schema=None, sep=',', header=True,inferSchema=True)
-        print(XY_train.columns)
-        print(XY_train.count())
-        cols1 = list(XY_train.columns)
-        cols1.remove('TransactionDT')
-        for c in ['D6', 'D7', 'D8', 'D9', 'D12', 'D13', 'D14']:
-            cols1.remove(c)
-        for c in ['DT_M', 'day', 'uid']:
-            print(c)
-            cols1.remove(c)
+    if step == 2:
+        with timer("model train test:"):
+            # LOAD TRAIN
+            cols_float = cols.copy()
+            cols_float.remove('TransactionID')
 
-        # FAILED TIME CONSISTENCY TEST
-        for c in ['C3', 'M5', 'id_08', 'id_33']:
-            cols1.remove(c)
-        for c in ['card4', 'id_07', 'id_14', 'id_21', 'id_30', 'id_32', 'id_34']:
-            cols1.remove(c)
-        for c in ['id_' + str(x) for x in range(22, 28)]:
-            cols1.remove(c)
+            # 问题2：直接用read.csv的默认参数读取hdfs上面的csv，会导致所有列的类型被读取为string，需要设置inferSchema=True，来自动推测列类型，达到pandas的read_csv的效果
+            if debug:
+                XY_train = spark.read.csv(path=path + 'XY_train.csv', schema=None, sep=',', header=True,
+                                         inferSchema=True)
+                XY_train = XY_train.sample(fraction=0.1, seed=2020)
+            else:
+                XY_train = spark.read.csv(path=path + 'XY_train.csv', schema=None, sep=',', header=True,
+                                         inferSchema=True)
+            # X_test = spark.read.csv(path=path+'X_test.csv', schema=None, sep=',', header=True,inferSchema=True)
+            print(XY_train.columns)
+            print(XY_train.count())
+            cols1 = list(XY_train.columns)
+            cols1.remove('TransactionDT')
+            for c in ['D6', 'D7', 'D8', 'D9', 'D12', 'D13', 'D14']:
+                cols1.remove(c)
+            for c in ['DT_M', 'day', 'uid']:
+                print(c)
+                cols1.remove(c)
 
-        for c in ['train_label', 'ProductCD', 'TransactionID']:
-            print(c)
-            cols1.remove(c)
+            # FAILED TIME CONSISTENCY TEST
+            for c in ['C3', 'M5', 'id_08', 'id_33']:
+                cols1.remove(c)
+            for c in ['card4', 'id_07', 'id_14', 'id_21', 'id_30', 'id_32', 'id_34']:
+                cols1.remove(c)
+            for c in ['id_' + str(x) for x in range(22, 28)]:
+                cols1.remove(c)
 
-        print('NOW USING THE FOLLOWING', len(cols1), 'FEATURES.')
-        XY_train = XY_train.fillna(0)
-        train, test = XY_train.randomSplit([0.8, 0.2], seed=2019)
-        print('~~~~~~~~~~~~~',test.count())
-        # train.show(100)
-        for i in cols1:
-            if i not in train.columns:
-                print(i)
-        cols1.remove('isFraud')
-        featurizer = VectorAssembler(
-            inputCols=cols1,
-            outputCol='features'
-        )
-        # 问题12：此处后面的‘features’列对应于VectorAssembler里面的inputCols里面所有的列，全部会合并到‘features’里面变为一个向量，spark训练要求使用此种格式传入，不然会报错，找不到features列，
-        # 剩余的列用于训练后评估指标。验证集的处理方式一样
-        train_data = featurizer.transform(train)['TransactionID', 'features','isFraud']
-        featurizer = VectorAssembler(
-            inputCols=cols1,
-            outputCol='features'
-        )
-        test_data = featurizer.transform(test)['TransactionID','features','isFraud']
-        print(test_data.count(),len(test_data.columns))
-        from mmlspark.lightgbm import LightGBMClassifier
-        model = LightGBMClassifier(learningRate=0.05,
-                                   numIterations=400,isUnbalance = True
-                                   numLeaves=31,labelCol='isFraud').fit(train_data)
-        print('train finish')
-        predict = model.transform(test_data)['prediction','isFraud','probability','rawPrediction']
-        print('ppredict finish')
-        predict = predict.toPandas()
-        def dense_to_num(x):
-            a = x.values[1]
-            return a
-        predict['probability'] = predict['probability'].apply(dense_to_num)
-        print(roc_auc_score(predict['isFraud'],predict['probability']))
+            for c in ['train_label', 'ProductCD', 'TransactionID']:
+                print(c)
+                cols1.remove(c)
+
+            print('NOW USING THE FOLLOWING', len(cols1), 'FEATURES.')
+            XY_train = XY_train.fillna(0)
+            train, test = XY_train.randomSplit([0.8, 0.2], seed=2019)
+            print('~~~~~~~~~~~~~',test.count())
+            # train.show(100)
+            for i in cols1:
+                if i not in train.columns:
+                    print(i)
+            cols1.remove('isFraud')
+            featurizer = VectorAssembler(
+                inputCols=cols1,
+                outputCol='features'
+            )
+            # 问题12：此处后面的‘features’列对应于VectorAssembler里面的inputCols里面所有的列，全部会合并到‘features’里面变为一个向量，mmlspark训练要求使用此种格式传入，不然会报错，找不到features列，
+            # features这个名字，可以修改LightGBMClassifier里面的默认名称来设置。剩余的列用于训练后评估指标。验证集的处理方式一样.
+            train_data = featurizer.transform(train)['TransactionID', 'features','isFraud']
+            featurizer = VectorAssembler(
+                inputCols=cols1,
+                outputCol='features'
+            )
+            test_data = featurizer.transform(test)['TransactionID','features','isFraud']
+            print(test_data.count(),len(test_data.columns))
+            from mmlspark.lightgbm import LightGBMClassifier
+            model = LightGBMClassifier(learningRate=0.05,
+                                       numIterations=200,isUnbalance = True,
+                                       numLeaves=31,labelCol='isFraud').fit(train_data)
+            print('train finish')
+            predict = model.transform(test_data)['prediction','isFraud','probability','rawPrediction']
+            print('ppredict finish')
+            predict = predict.toPandas()
+            def dense_to_num(x):
+                tmp = x.values[1]
+                return tmp
+            predict['probability'] = predict['probability'].apply(dense_to_num)
+            print('AUC SCORE:',roc_auc_score(predict['isFraud'],predict['probability']))
 
 
 if __name__ == "__main__":
     path = "hdfs://localhost:9000/user/kaggle_fraud_detection/data/"
     with timer("Full feature select run"):
-        main(path = path,run_mode = 'standalone',debug = False)
+        main(path = path,run_mode = 'standalone',step=2,debug = True)
