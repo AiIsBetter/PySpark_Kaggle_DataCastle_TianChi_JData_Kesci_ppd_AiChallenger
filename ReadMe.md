@@ -24,7 +24,7 @@
   <li>Python包版本
         <ul>
           <li>Pandas == 0.25.0
-          <li>numpy == 1.17.2
+          <li>Numpy == 1.17.2
           <li>PySpark == 2.4.0.post2
       </ul>
    </li>
